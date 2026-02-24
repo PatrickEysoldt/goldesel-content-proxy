@@ -304,8 +304,8 @@ async function searchConsoleForPath(path, excludePath = null) {
   };
 
   const [summary, prevSummary, keywords, pages] = await Promise.all([
-    safeQuery({ siteUrl: GSC_SITE, requestBody: { startDate, endDate, dimensions: [], dimensionFilterGroups: makeFilters() } }),
-    safeQuery({ siteUrl: GSC_SITE, requestBody: { startDate: prevStart, endDate: prevEnd, dimensions: [], dimensionFilterGroups: makeFilters() } }),
+    safeQuery({ siteUrl: GSC_SITE, requestBody: { startDate, endDate, dimensionFilterGroups: makeFilters() } }),
+    safeQuery({ siteUrl: GSC_SITE, requestBody: { startDate: prevStart, endDate: prevEnd, dimensionFilterGroups: makeFilters() } }),
     safeQuery({ siteUrl: GSC_SITE, requestBody: { startDate, endDate, dimensions: ['query'], dimensionFilterGroups: makeFilters(), rowLimit: 10, orderBy: [{ fieldName: 'clicks', sortOrder: 'DESCENDING' }] } }),
     safeQuery({ siteUrl: GSC_SITE, requestBody: { startDate, endDate, dimensions: ['page'], dimensionFilterGroups: makeFilters(), rowLimit: 10, orderBy: [{ fieldName: 'clicks', sortOrder: 'DESCENDING' }] } }),
   ]);
@@ -345,31 +345,133 @@ async function searchConsoleForPath(path, excludePath = null) {
 }
 
 // Redaktionelle Artikel: goldesel.de/news/ aber NICHT /aktien/news/
-async function searchConsoleNews()       { return searchConsoleForPath('/news/', '/aktien/news/'); }
+// Verwende Regex statt contains+notContains für zuverlässigere Filterung
+async function searchConsoleNews() {
+  return searchConsoleForPathRegex(
+    '/news/',                              // include: URLs mit /news/
+    '^https://goldesel\\.de/aktien/news/'  // exclude regex: URLs die mit /aktien/news/ starten
+  );
+}
 // KI News: goldesel.de/aktien/news/
 async function searchConsoleAktienNews() { return searchConsoleForPath('/aktien/news/'); }
-// Debug: top pages without filter
+
+// Regex-basierte Variante für komplexere Filter
+async function searchConsoleForPathRegex(includePath, excludeRegex = null) {
+  const sc = getSearchConsoleClient();
+  const now = new Date();
+  const endDate = fmtDate(now);
+  const startDate = fmtDate(new Date(now.getFullYear(), now.getMonth(), 1));
+  const firstDayThisMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+  const lastDayLastMonth = new Date(firstDayThisMonth - 1);
+  const firstDayLastMonth = new Date(lastDayLastMonth.getFullYear(), lastDayLastMonth.getMonth(), 1);
+  const prevStart = fmtDate(firstDayLastMonth);
+  const prevEnd = fmtDate(lastDayLastMonth);
+
+  const makeFilters = () => {
+    const filters = [{ dimension: 'page', operator: 'contains', expression: includePath }];
+    if (excludeRegex) {
+      filters.push({ dimension: 'page', operator: 'excludingRegex', expression: excludeRegex });
+    }
+    return [{ filters }];
+  };
+
+  const safeQuery = async (params) => {
+    try {
+      const result = await sc.searchanalytics.query(params);
+      return result;
+    } catch (err) {
+      console.error(`GSC regex query failed for include="${includePath}" exclude="${excludeRegex}":`, err.message);
+      return { data: { rows: [] } };
+    }
+  };
+
+  const [summary, prevSummary, keywords, pages] = await Promise.all([
+    safeQuery({ siteUrl: GSC_SITE, requestBody: { startDate, endDate, dimensionFilterGroups: makeFilters() } }),
+    safeQuery({ siteUrl: GSC_SITE, requestBody: { startDate: prevStart, endDate: prevEnd, dimensionFilterGroups: makeFilters() } }),
+    safeQuery({ siteUrl: GSC_SITE, requestBody: { startDate, endDate, dimensions: ['query'], dimensionFilterGroups: makeFilters(), rowLimit: 10, orderBy: [{ fieldName: 'clicks', sortOrder: 'DESCENDING' }] } }),
+    safeQuery({ siteUrl: GSC_SITE, requestBody: { startDate, endDate, dimensions: ['page'], dimensionFilterGroups: makeFilters(), rowLimit: 10, orderBy: [{ fieldName: 'clicks', sortOrder: 'DESCENDING' }] } }),
+  ]);
+
+  const s = summary.data.rows?.[0] || { clicks: 0, impressions: 0, ctr: 0, position: 0 };
+  const p = prevSummary.data.rows?.[0] || { clicks: 0, impressions: 0, ctr: 0, position: 0 };
+  const deltaCalc = (c, prev) => prev === 0 ? null : Math.round(((c - prev) / prev) * 100);
+
+  return {
+    summary: {
+      clicks: Math.round(s.clicks),
+      impressions: Math.round(s.impressions),
+      ctr: Math.round(s.ctr * 1000) / 10,
+      position: Math.round(s.position * 10) / 10,
+    },
+    delta: {
+      clicks: deltaCalc(s.clicks, p.clicks),
+      impressions: deltaCalc(s.impressions, p.impressions),
+      ctr: Math.round((s.ctr - p.ctr) * 1000) / 10,
+      position: Math.round((p.position - s.position) * 10) / 10,
+    },
+    keywords: keywords.data.rows?.map(r => ({
+      keyword: r.keys[0],
+      clicks: Math.round(r.clicks),
+      impressions: Math.round(r.impressions),
+      ctr: Math.round(r.ctr * 1000) / 10,
+      position: Math.round(r.position * 10) / 10,
+    })) || [],
+    pages: pages.data.rows?.map(r => ({
+      page: r.keys[0],
+      clicks: Math.round(r.clicks),
+      impressions: Math.round(r.impressions),
+      ctr: Math.round(r.ctr * 1000) / 10,
+      position: Math.round(r.position * 10) / 10,
+    })) || [],
+  };
+}
+// Debug: top pages without filter + filtered views for /news/ and /aktien/news/
 async function searchConsoleDebug() {
   const sc = getSearchConsoleClient();
   const now = new Date();
   const startDate = fmtDate(new Date(now.getFullYear(), now.getMonth(), 1));
   const endDate = fmtDate(now);
-  const result = await sc.searchanalytics.query({
-    siteUrl: GSC_SITE,
-    requestBody: {
-      startDate, endDate,
-      dimensions: ['page'],
-      rowLimit: 25,
-      orderBy: [{ fieldName: 'clicks', sortOrder: 'DESCENDING' }],
-    },
-  });
+
+  const queryPages = async (filters) => {
+    try {
+      const result = await sc.searchanalytics.query({
+        siteUrl: GSC_SITE,
+        requestBody: {
+          startDate, endDate,
+          dimensions: ['page'],
+          rowLimit: 10,
+          orderBy: [{ fieldName: 'clicks', sortOrder: 'DESCENDING' }],
+          ...(filters ? { dimensionFilterGroups: filters } : {}),
+        },
+      });
+      return (result.data.rows || []).map(r => ({
+        page: r.keys[0],
+        clicks: Math.round(r.clicks),
+        impressions: Math.round(r.impressions),
+      }));
+    } catch (err) {
+      return [{ error: err.message }];
+    }
+  };
+
+  const [allPages, newsPages, aktienNewsPages] = await Promise.all([
+    queryPages(null),
+    queryPages([{ filters: [
+      { dimension: 'page', operator: 'contains', expression: '/news/' },
+      { dimension: 'page', operator: 'excludingRegex', expression: '^https://goldesel\\.de/aktien/news/' }
+    ]}]),
+    queryPages([{ filters: [
+      { dimension: 'page', operator: 'contains', expression: '/aktien/news/' }
+    ]}]),
+  ]);
+
   return {
-    info: 'Top 25 pages by clicks (no filter) — use to verify path patterns',
-    pages: (result.data.rows || []).map(r => ({
-      page: r.keys[0],
-      clicks: Math.round(r.clicks),
-      impressions: Math.round(r.impressions),
-    })),
+    info: 'Debug: zeigt Top-Seiten ungefiltert + gefiltert für /news/ und /aktien/news/',
+    gscSite: GSC_SITE,
+    dateRange: { startDate, endDate },
+    allPages,
+    newsPages_excludingAktien: newsPages,
+    aktienNewsPages,
   };
 }
 

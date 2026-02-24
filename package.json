@@ -1,0 +1,12 @@
+{
+  "name": "goldesel-content-proxy",
+  "version": "1.0.0",
+  "description": "Proxy server for GA4 and WordPress data",
+  "main": "api/data.js",
+  "dependencies": {
+    "@google-analytics/data": "^4.3.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

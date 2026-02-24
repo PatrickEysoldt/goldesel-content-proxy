@@ -277,7 +277,7 @@ async function searchConsoleData() {
 
   const makeFilter = (paths) => ({
     filters: paths.map(p => ({ dimension: 'page', operator: 'contains', expression: p })),
-    groupType: 'or',
+    groupType: 'OR',
   });
 
   const [summaryRes, prevSummaryRes, keywordsRes, pagesRes] = await Promise.all([

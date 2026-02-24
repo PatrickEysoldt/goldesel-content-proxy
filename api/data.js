@@ -94,8 +94,15 @@ async function getArticlesWithChannels({ startDate, endDate, wpQuery, limit = 10
   });
 
   return posts.map(p => {
-    const ga4Path = `/artikel/${p.slug}/`;
-    const data = viewMap[ga4Path] || viewMap[`/artikel/${p.slug}`] || { total: 0, channels: {} };
+    // Derive GA4 path from the WP permalink (e.g. https://goldesel.de/news/my-slug/ → /news/my-slug/)
+    let ga4Path;
+    try {
+      ga4Path = new URL(p.link).pathname;
+    } catch {
+      ga4Path = `/news/${p.slug}/`;
+    }
+    const ga4PathNoTrailing = ga4Path.replace(/\/$/, '');
+    const data = viewMap[ga4Path] || viewMap[ga4PathNoTrailing] || { total: 0, channels: {} };
     return {
       title: p.title.rendered,
       path: ga4Path,
@@ -222,8 +229,12 @@ async function monthlyStats() {
     ],
   });
 
-  const extract = (name) => {
-    const row = response.rows?.find(r => r.dimensionValues?.[0]?.value === name);
+  // GA4 returns separate metricValues arrays per dateRange when no dimensions are used.
+  // With no dimensions, there's typically one row with metricValues[i] containing values
+  // for each metric across the date ranges in order.
+  // When multiple dateRanges are given without dimensions, each row corresponds to a dateRange.
+  const extractRow = (index) => {
+    const row = response.rows?.[index];
     if (!row) return { pageviews: 0, sessions: 0, newUsers: 0, totalUsers: 0 };
     return {
       pageviews: parseInt(row.metricValues[0].value),
@@ -233,8 +244,8 @@ async function monthlyStats() {
     };
   };
 
-  const thisMonth = extract('thisMonth');
-  const lastMonth = extract('lastMonth');
+  const thisMonth = extractRow(0);
+  const lastMonth = extractRow(1);
   const delta = (c, p) => p === 0 ? null : Math.round(((c - p) / p) * 100);
 
   return {
@@ -344,12 +355,12 @@ module.exports = async function handler(req, res) {
       case 'kpis':         data = await kpis();               break;
       case 'sources':      data = await sources();            break;
       case 'articles':     data = await articles();           break;
-      case 'searchconsole':          data = await searchConsoleNews();        break;
+      case 'monthlyStats': data = await monthlyStats();          break;
       case 'searchconsoleNews':       data = await searchConsoleNews();        break;
       case 'searchconsoleAktienNews': data = await searchConsoleAktienNews();  break;
       case 'newArticles':  data = await newArticlesThisMonth(); break;
       default:
-        return res.status(400).json({ error: `Unbekannte action. Verfügbar: top5, flop5, top5New, flop5New, topstories, kpis, sources, articles, monthlyStats, newArticles` });
+        return res.status(400).json({ error: `Unbekannte action. Verfügbar: top5, flop5, top5New, flop5New, topstories, kpis, sources, articles, monthlyStats, searchconsoleNews, searchconsoleAktienNews, newArticles` });
     }
     return res.status(200).json({ success: true, data });
   } catch (err) {

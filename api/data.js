@@ -261,7 +261,7 @@ async function newArticlesThisMonth() {
 }
 
 // ─── Search Console Helper ────────────────────────────────────────────────────
-async function searchConsoleForPath(path) {
+async function searchConsoleForPath(path, excludePath = null) {
   const sc = getSearchConsoleClient();
   const now = new Date();
   const endDate = fmtDate(now);
@@ -272,13 +272,18 @@ async function searchConsoleForPath(path) {
   const prevStart = fmtDate(firstDayLastMonth);
   const prevEnd = fmtDate(lastDayLastMonth);
 
-  const filter = { filters: [{ dimension: 'page', operator: 'contains', expression: path }] };
+  // Filter: include path, optionally exclude a sub-path
+  const makeFilters = () => {
+    const filters = [{ dimension: 'page', operator: 'contains', expression: path }];
+    if (excludePath) filters.push({ dimension: 'page', operator: 'notContains', expression: excludePath });
+    return [{ filters }];
+  };
 
   const [summary, prevSummary, keywords, pages] = await Promise.all([
-    sc.searchanalytics.query({ siteUrl: GSC_SITE, requestBody: { startDate, endDate, dimensions: [], dimensionFilterGroups: [filter] } }),
-    sc.searchanalytics.query({ siteUrl: GSC_SITE, requestBody: { startDate: prevStart, endDate: prevEnd, dimensions: [], dimensionFilterGroups: [filter] } }),
-    sc.searchanalytics.query({ siteUrl: GSC_SITE, requestBody: { startDate, endDate, dimensions: ['query'], dimensionFilterGroups: [filter], rowLimit: 10, orderBy: [{ fieldName: 'clicks', sortOrder: 'DESCENDING' }] } }),
-    sc.searchanalytics.query({ siteUrl: GSC_SITE, requestBody: { startDate, endDate, dimensions: ['page'], dimensionFilterGroups: [filter], rowLimit: 10, orderBy: [{ fieldName: 'clicks', sortOrder: 'DESCENDING' }] } }),
+    sc.searchanalytics.query({ siteUrl: GSC_SITE, requestBody: { startDate, endDate, dimensions: [], dimensionFilterGroups: makeFilters() } }),
+    sc.searchanalytics.query({ siteUrl: GSC_SITE, requestBody: { startDate: prevStart, endDate: prevEnd, dimensions: [], dimensionFilterGroups: makeFilters() } }),
+    sc.searchanalytics.query({ siteUrl: GSC_SITE, requestBody: { startDate, endDate, dimensions: ['query'], dimensionFilterGroups: makeFilters(), rowLimit: 10, orderBy: [{ fieldName: 'clicks', sortOrder: 'DESCENDING' }] } }),
+    sc.searchanalytics.query({ siteUrl: GSC_SITE, requestBody: { startDate, endDate, dimensions: ['page'], dimensionFilterGroups: makeFilters(), rowLimit: 10, orderBy: [{ fieldName: 'clicks', sortOrder: 'DESCENDING' }] } }),
   ]);
 
   const s = summary.data.rows?.[0] || { clicks: 0, impressions: 0, ctr: 0, position: 0 };
@@ -315,7 +320,9 @@ async function searchConsoleForPath(path) {
   };
 }
 
-async function searchConsoleNews()       { return searchConsoleForPath('/news/'); }
+// /news/ aber NICHT /aktien/news/
+async function searchConsoleNews()       { return searchConsoleForPath('/news/', '/aktien/news/'); }
+// nur /aktien/news/
 async function searchConsoleAktienNews() { return searchConsoleForPath('/aktien/news/'); }
 
 // ─── Handler ──────────────────────────────────────────────────────────────────

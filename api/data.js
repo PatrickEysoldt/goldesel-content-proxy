@@ -23,27 +23,65 @@ async function wpFetch(path) {
   return res.json();
 }
 
-// ─── Actions ──────────────────────────────────────────────────────────────────
-
-// Top 5 Artikel nach Pageviews (letzte 30 Tage)
-async function top5() {
+// ─── Hilfsfunktion: WP Artikel + GA4 Views matchen ───────────────────────────
+async function getArticlesWithViews({ startDate, endDate, limit = 100 }) {
   const client = getGA4Client();
+
+  // WordPress: alle Artikel im Zeitraum holen (nach Publish-Datum)
+  const after = new Date(startDate).toISOString();
+  const posts = await wpFetch(`posts?per_page=${limit}&status=publish&after=${after}&orderby=date&order=desc&_fields=id,title,link,date,slug`);
+
+  if (!posts.length) return [];
+
+  // GA4: Pageviews im Zeitraum für alle Seiten
   const [response] = await client.runReport({
     property: propertyId,
-    dateRanges: [{ startDate: '30daysAgo', endDate: 'today' }],
-    dimensions: [{ name: 'pagePath' }, { name: 'pageTitle' }],
+    dateRanges: [{ startDate, endDate }],
+    dimensions: [{ name: 'pagePath' }],
     metrics: [{ name: 'screenPageViews' }],
-    orderBys: [{ metric: { metricName: 'screenPageViews' }, desc: true }],
-    limit: 5,
+    limit: 5000,
   });
 
-  return response.rows.map((row) => ({
-    path: row.dimensionValues[0].value,
-    title: row.dimensionValues[1].value,
-    pageviews: parseInt(row.metricValues[0].value),
-  }));
+  // Map: slug → pageviews
+  const viewMap = {};
+  response.rows?.forEach(row => {
+    const path = row.dimensionValues[0].value;
+    viewMap[path] = parseInt(row.metricValues[0].value);
+  });
+
+  // Artikel mit Views anreichern (WordPress Titel als Source of Truth)
+  return posts.map(p => {
+    // Pfad aus URL extrahieren
+    const url = new URL(p.link);
+    const path = url.pathname;
+    const pageviews = viewMap[path] || viewMap['/' + p.slug + '/'] || viewMap['/' + p.slug] || 0;
+    return {
+      title: p.title.rendered,
+      path,
+      url: p.link,
+      slug: p.slug,
+      date: p.date,
+      pageviews,
+    };
+  });
 }
 
+// Top 5 Artikel nach Pageviews (letzte 30 Tage, nur echte WP Artikel)
+async function top5() {
+  const articles = await getArticlesWithViews({ startDate: '30daysAgo', endDate: 'today', limit: 100 });
+  return articles
+    .sort((a, b) => b.pageviews - a.pageviews)
+    .slice(0, 5);
+}
+
+// Flop 5 Artikel (wenigste Pageviews, letzte 30 Tage, nur echte WP Artikel)
+async function flop5() {
+  const articles = await getArticlesWithViews({ startDate: '30daysAgo', endDate: 'today', limit: 100 });
+  return articles
+    .filter(a => a.pageviews > 0)
+    .sort((a, b) => a.pageviews - b.pageviews)
+    .slice(0, 5);
+}
 // Gesamt-KPIs (letzte 30 Tage)
 async function kpis() {
   const client = getGA4Client();
@@ -96,33 +134,7 @@ async function articles() {
   }));
 }
 
-// Flop 5 Artikel (wenigste Pageviews, letzte 30 Tage, min. 10 Views um Ausreißer zu vermeiden)
-async function flop5() {
-  const client = getGA4Client();
-  const [response] = await client.runReport({
-    property: propertyId,
-    dateRanges: [{ startDate: '30daysAgo', endDate: 'today' }],
-    dimensions: [{ name: 'pagePath' }, { name: 'pageTitle' }],
-    metrics: [{ name: 'screenPageViews' }],
-    orderBys: [{ metric: { metricName: 'screenPageViews' }, desc: false }],
-    limit: 20,
-  });
 
-  // Filter out non-article pages and very low traffic pages
-  const rows = response.rows
-    .filter(row => {
-      const path = row.dimensionValues[0].value;
-      const views = parseInt(row.metricValues[0].value);
-      return views >= 10 && path !== '/' && !path.includes('?') && path.length > 1;
-    })
-    .slice(0, 5);
-
-  return rows.map((row) => ({
-    path: row.dimensionValues[0].value,
-    title: row.dimensionValues[1].value,
-    pageviews: parseInt(row.metricValues[0].value),
-  }));
-}
 
 // Vollständige Monatsstatistik inkl. Vormonatsvergleich
 async function monthlyStats() {

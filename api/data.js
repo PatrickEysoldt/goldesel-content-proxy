@@ -94,15 +94,8 @@ async function getArticlesWithChannels({ startDate, endDate, wpQuery, limit = 10
   });
 
   return posts.map(p => {
-    // Derive GA4 path from the WP permalink (e.g. https://goldesel.de/news/my-slug/ → /news/my-slug/)
-    let ga4Path;
-    try {
-      ga4Path = new URL(p.link).pathname;
-    } catch {
-      ga4Path = `/news/${p.slug}/`;
-    }
-    const ga4PathNoTrailing = ga4Path.replace(/\/$/, '');
-    const data = viewMap[ga4Path] || viewMap[ga4PathNoTrailing] || { total: 0, channels: {} };
+    const ga4Path = `/artikel/${p.slug}/`;
+    const data = viewMap[ga4Path] || viewMap[`/artikel/${p.slug}`] || { total: 0, channels: {} };
     return {
       title: p.title.rendered,
       path: ga4Path,
@@ -229,12 +222,8 @@ async function monthlyStats() {
     ],
   });
 
-  // GA4 returns separate metricValues arrays per dateRange when no dimensions are used.
-  // With no dimensions, there's typically one row with metricValues[i] containing values
-  // for each metric across the date ranges in order.
-  // When multiple dateRanges are given without dimensions, each row corresponds to a dateRange.
-  const extractRow = (index) => {
-    const row = response.rows?.[index];
+  const extract = (name) => {
+    const row = response.rows?.find(r => r.dimensionValues?.[0]?.value === name);
     if (!row) return { pageviews: 0, sessions: 0, newUsers: 0, totalUsers: 0 };
     return {
       pageviews: parseInt(row.metricValues[0].value),
@@ -244,8 +233,8 @@ async function monthlyStats() {
     };
   };
 
-  const thisMonth = extractRow(0);
-  const lastMonth = extractRow(1);
+  const thisMonth = extract('thisMonth');
+  const lastMonth = extract('lastMonth');
   const delta = (c, p) => p === 0 ? null : Math.round(((c - p) / p) * 100);
 
   return {
@@ -284,17 +273,29 @@ async function searchConsoleForPath(path, excludePath = null) {
   const prevEnd = fmtDate(lastDayLastMonth);
 
   // Filter: include path, optionally exclude a sub-path
+  // Filters within a group are AND'd
   const makeFilters = () => {
     const filters = [{ dimension: 'page', operator: 'contains', expression: path }];
     if (excludePath) filters.push({ dimension: 'page', operator: 'notContains', expression: excludePath });
     return [{ filters }];
   };
 
+  // Each call independently wrapped so one failure doesn't block all
+  const safeQuery = async (params) => {
+    try {
+      const result = await sc.searchanalytics.query(params);
+      return result;
+    } catch (err) {
+      console.error(`GSC query failed for path="${path}":`, err.message);
+      return { data: { rows: [] } };
+    }
+  };
+
   const [summary, prevSummary, keywords, pages] = await Promise.all([
-    sc.searchanalytics.query({ siteUrl: GSC_SITE, requestBody: { startDate, endDate, dimensions: [], dimensionFilterGroups: makeFilters() } }),
-    sc.searchanalytics.query({ siteUrl: GSC_SITE, requestBody: { startDate: prevStart, endDate: prevEnd, dimensions: [], dimensionFilterGroups: makeFilters() } }),
-    sc.searchanalytics.query({ siteUrl: GSC_SITE, requestBody: { startDate, endDate, dimensions: ['query'], dimensionFilterGroups: makeFilters(), rowLimit: 10, orderBy: [{ fieldName: 'clicks', sortOrder: 'DESCENDING' }] } }),
-    sc.searchanalytics.query({ siteUrl: GSC_SITE, requestBody: { startDate, endDate, dimensions: ['page'], dimensionFilterGroups: makeFilters(), rowLimit: 10, orderBy: [{ fieldName: 'clicks', sortOrder: 'DESCENDING' }] } }),
+    safeQuery({ siteUrl: GSC_SITE, requestBody: { startDate, endDate, dimensions: [], dimensionFilterGroups: makeFilters() } }),
+    safeQuery({ siteUrl: GSC_SITE, requestBody: { startDate: prevStart, endDate: prevEnd, dimensions: [], dimensionFilterGroups: makeFilters() } }),
+    safeQuery({ siteUrl: GSC_SITE, requestBody: { startDate, endDate, dimensions: ['query'], dimensionFilterGroups: makeFilters(), rowLimit: 10, orderBy: [{ fieldName: 'clicks', sortOrder: 'DESCENDING' }] } }),
+    safeQuery({ siteUrl: GSC_SITE, requestBody: { startDate, endDate, dimensions: ['page'], dimensionFilterGroups: makeFilters(), rowLimit: 10, orderBy: [{ fieldName: 'clicks', sortOrder: 'DESCENDING' }] } }),
   ]);
 
   const s = summary.data.rows?.[0] || { clicks: 0, impressions: 0, ctr: 0, position: 0 };
@@ -335,6 +336,30 @@ async function searchConsoleForPath(path, excludePath = null) {
 async function searchConsoleNews()       { return searchConsoleForPath('/news/', '/aktien/news/'); }
 // nur /aktien/news/
 async function searchConsoleAktienNews() { return searchConsoleForPath('/aktien/news/'); }
+// Debug: top pages without filter
+async function searchConsoleDebug() {
+  const sc = getSearchConsoleClient();
+  const now = new Date();
+  const startDate = fmtDate(new Date(now.getFullYear(), now.getMonth(), 1));
+  const endDate = fmtDate(now);
+  const result = await sc.searchanalytics.query({
+    siteUrl: GSC_SITE,
+    requestBody: {
+      startDate, endDate,
+      dimensions: ['page'],
+      rowLimit: 25,
+      orderBy: [{ fieldName: 'clicks', sortOrder: 'DESCENDING' }],
+    },
+  });
+  return {
+    info: 'Top 25 pages by clicks (no filter) — use to verify path patterns',
+    pages: (result.data.rows || []).map(r => ({
+      page: r.keys[0],
+      clicks: Math.round(r.clicks),
+      impressions: Math.round(r.impressions),
+    })),
+  };
+}
 
 // ─── Handler ──────────────────────────────────────────────────────────────────
 module.exports = async function handler(req, res) {
@@ -355,12 +380,14 @@ module.exports = async function handler(req, res) {
       case 'kpis':         data = await kpis();               break;
       case 'sources':      data = await sources();            break;
       case 'articles':     data = await articles();           break;
-      case 'monthlyStats': data = await monthlyStats();          break;
+      case 'searchconsole':          data = await searchConsoleNews();        break;
       case 'searchconsoleNews':       data = await searchConsoleNews();        break;
       case 'searchconsoleAktienNews': data = await searchConsoleAktienNews();  break;
+      case 'searchconsoleDebug':      data = await searchConsoleDebug();       break;
+      case 'monthlyStats': data = await monthlyStats();    break;
       case 'newArticles':  data = await newArticlesThisMonth(); break;
       default:
-        return res.status(400).json({ error: `Unbekannte action. Verfügbar: top5, flop5, top5New, flop5New, topstories, kpis, sources, articles, monthlyStats, searchconsoleNews, searchconsoleAktienNews, newArticles` });
+        return res.status(400).json({ success: false, error: `Unbekannte action: "${action}". Verfügbar: top5, flop5, top5New, flop5New, topstories, kpis, sources, articles, monthlyStats, searchconsoleNews, searchconsoleAktienNews, newArticles` });
     }
     return res.status(200).json({ success: true, data });
   } catch (err) {

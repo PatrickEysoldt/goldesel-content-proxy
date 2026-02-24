@@ -272,45 +272,38 @@ async function searchConsoleData() {
   const prevStart = fmtDate(firstDayLastMonth);
   const prevEnd = fmtDate(lastDayLastMonth);
 
-  // Zwei Pfade: /news/ und /aktien/news/
-  const pathFilters = ['/news/', '/aktien/news/'];
+  // Zwei Pfade: /news/ und /aktien/news/ – separate Queries dann zusammenführen
 
-  const makeFilter = (paths) => ({
-    filters: paths.map(p => ({ dimension: 'page', operator: 'contains', expression: p })),
-    groupType: 'OR',
+  const makeFilter = (path) => ({
+    filters: [{ dimension: 'page', operator: 'contains', expression: path }],
   });
 
-  const [summaryRes, prevSummaryRes, keywordsRes, pagesRes] = await Promise.all([
-    sc.searchanalytics.query({
-      siteUrl: GSC_SITE,
-      requestBody: { startDate, endDate, dimensions: [], dimensionFilterGroups: [makeFilter(pathFilters)] },
-    }),
-    sc.searchanalytics.query({
-      siteUrl: GSC_SITE,
-      requestBody: { startDate: prevStart, endDate: prevEnd, dimensions: [], dimensionFilterGroups: [makeFilter(pathFilters)] },
-    }),
-    sc.searchanalytics.query({
-      siteUrl: GSC_SITE,
-      requestBody: {
-        startDate, endDate, dimensions: ['query'],
-        dimensionFilterGroups: [makeFilter(pathFilters)],
-        rowLimit: 10,
-        orderBy: [{ fieldName: 'clicks', sortOrder: 'DESCENDING' }],
-      },
-    }),
-    sc.searchanalytics.query({
-      siteUrl: GSC_SITE,
-      requestBody: {
-        startDate, endDate, dimensions: ['page'],
-        dimensionFilterGroups: [makeFilter(pathFilters)],
-        rowLimit: 10,
-        orderBy: [{ fieldName: 'clicks', sortOrder: 'DESCENDING' }],
-      },
-    }),
+  // Zwei separate Queries für /news/ und /aktien/news/, dann zusammenführen
+  const [summaryNews, summaryAktien, prevNews, prevAktien, keywordsRes, pagesRes] = await Promise.all([
+    sc.searchanalytics.query({ siteUrl: GSC_SITE, requestBody: { startDate, endDate, dimensions: [], dimensionFilterGroups: [makeFilter('/news/')] } }),
+    sc.searchanalytics.query({ siteUrl: GSC_SITE, requestBody: { startDate, endDate, dimensions: [], dimensionFilterGroups: [makeFilter('/aktien/news/')] } }),
+    sc.searchanalytics.query({ siteUrl: GSC_SITE, requestBody: { startDate: prevStart, endDate: prevEnd, dimensions: [], dimensionFilterGroups: [makeFilter('/news/')] } }),
+    sc.searchanalytics.query({ siteUrl: GSC_SITE, requestBody: { startDate: prevStart, endDate: prevEnd, dimensions: [], dimensionFilterGroups: [makeFilter('/aktien/news/')] } }),
+    sc.searchanalytics.query({ siteUrl: GSC_SITE, requestBody: { startDate, endDate, dimensions: ['query'], dimensionFilterGroups: [makeFilter('/news/')], rowLimit: 10, orderBy: [{ fieldName: 'clicks', sortOrder: 'DESCENDING' }] } }),
+    sc.searchanalytics.query({ siteUrl: GSC_SITE, requestBody: { startDate, endDate, dimensions: ['page'], dimensionFilterGroups: [makeFilter('/news/')], rowLimit: 10, orderBy: [{ fieldName: 'clicks', sortOrder: 'DESCENDING' }] } }),
   ]);
 
-  const s = summaryRes.data.rows?.[0] || { clicks: 0, impressions: 0, ctr: 0, position: 0 };
-  const p = prevSummaryRes.data.rows?.[0] || { clicks: 0, impressions: 0, ctr: 0, position: 0 };
+  // Zusammenführen der Summary-Daten
+  const merge = (a, b) => {
+    const ra = a.data.rows?.[0] || { clicks: 0, impressions: 0, ctr: 0, position: 0 };
+    const rb = b.data.rows?.[0] || { clicks: 0, impressions: 0, ctr: 0, position: 0 };
+    const clicks = ra.clicks + rb.clicks;
+    const impressions = ra.impressions + rb.impressions;
+    return {
+      clicks,
+      impressions,
+      ctr: impressions > 0 ? clicks / impressions : 0,
+      position: (ra.position + rb.position) / 2,
+    };
+  };
+
+  const s = merge(summaryNews, summaryAktien);
+  const p = merge(prevNews, prevAktien);
   const delta = (c, prev) => prev === 0 ? null : Math.round(((c - prev) / prev) * 100);
 
   return {

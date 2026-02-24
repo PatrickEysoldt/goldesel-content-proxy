@@ -62,13 +62,14 @@ async function getArticlesWithViews({ startDate, endDate, limit = 100 }) {
 
   // Artikel mit Views anreichern (WordPress Titel als Source of Truth)
   return posts.map(p => {
-    // Pfad aus URL extrahieren
     const url = new URL(p.link);
     const path = url.pathname;
-    const pageviews = viewMap[path] || viewMap['/' + p.slug + '/'] || viewMap['/' + p.slug] || 0;
+    // GA4 tracked Artikel unter /artikel/[slug]/ auf goldesel.de
+    const ga4Path = `/artikel/${p.slug}/`;
+    const pageviews = viewMap[ga4Path] || viewMap[`/artikel/${p.slug}`] || viewMap[path] || 0;
     return {
       title: p.title.rendered,
-      path,
+      path: ga4Path,
       url: p.link,
       slug: p.slug,
       date: p.date,

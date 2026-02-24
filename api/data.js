@@ -28,7 +28,18 @@ async function getArticlesWithViews({ startDate, endDate, limit = 100 }) {
   const client = getGA4Client();
 
   // WordPress: alle Artikel im Zeitraum holen (nach Publish-Datum)
-  const after = new Date(startDate).toISOString();
+  // GA4-Strings wie "30daysAgo" in echte Daten umrechnen
+  const resolveDate = (d) => {
+    if (d === 'today') return new Date();
+    const match = d.match(/^(\d+)daysAgo$/);
+    if (match) {
+      const date = new Date();
+      date.setDate(date.getDate() - parseInt(match[1]));
+      return date;
+    }
+    return new Date(d);
+  };
+  const after = resolveDate(startDate).toISOString();
   const posts = await wpFetch(`posts?per_page=${limit}&status=publish&after=${after}&orderby=date&order=desc&_fields=id,title,link,date,slug`);
 
   if (!posts.length) return [];

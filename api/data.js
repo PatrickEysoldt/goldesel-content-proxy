@@ -213,6 +213,120 @@ async function articles() {
   return posts.map(p => ({ id: p.id, title: p.title.rendered, url: p.link, date: p.date, slug: p.slug }));
 }
 
+// ─── Review: letzte Artikel mit Volltext für KI-Analyse ──────────────────────
+async function reviewCandidates() {
+  // Letzte 15 veröffentlichte + alle drafts/pending
+  const [published, drafts, pending] = await Promise.all([
+    wpFetch('posts?per_page=15&status=publish&orderby=date&order=desc&_fields=id,title,link,date,slug,categories,author,excerpt'),
+    wpFetch('posts?per_page=10&status=draft&orderby=date&order=desc&_fields=id,title,link,date,slug,categories,author,excerpt').catch(() => []),
+    wpFetch('posts?per_page=10&status=pending&orderby=date&order=desc&_fields=id,title,link,date,slug,categories,author,excerpt').catch(() => []),
+  ]);
+
+  const mapPost = (p, status) => ({
+    id: p.id,
+    title: p.title.rendered,
+    url: (p.link || '').replace('goldeselblog.de', 'goldesel.de'),
+    date: p.date,
+    slug: p.slug,
+    excerpt: (p.excerpt?.rendered || '').replace(/<[^>]*>/g, '').trim().substring(0, 200),
+    wpStatus: status,
+    categories: p.categories || [],
+  });
+
+  return [
+    ...pending.map(p => mapPost(p, 'pending')),
+    ...drafts.map(p => mapPost(p, 'draft')),
+    ...published.map(p => mapPost(p, 'publish')),
+  ];
+}
+
+// Volltext eines einzelnen Artikels für KI-Review
+async function articleContent(postId) {
+  if (!postId) throw new Error('postId parameter required');
+  const post = await wpFetch(`posts/${postId}?_fields=id,title,content,excerpt,slug,link,date,categories,author`);
+  // HTML-Tags entfernen für sauberen Text
+  const rawHtml = post.content?.rendered || '';
+  const plainText = rawHtml
+    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
+    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  // Struktur-Analyse aus HTML
+  const headings = [];
+  const h2Regex = /<h2[^>]*>(.*?)<\/h2>/gi;
+  const h3Regex = /<h3[^>]*>(.*?)<\/h3>/gi;
+  let match;
+  while ((match = h2Regex.exec(rawHtml)) !== null) {
+    headings.push({ level: 'H2', text: match[1].replace(/<[^>]*>/g, '').trim() });
+  }
+  while ((match = h3Regex.exec(rawHtml)) !== null) {
+    headings.push({ level: 'H3', text: match[1].replace(/<[^>]*>/g, '').trim() });
+  }
+
+  const wordCount = plainText.split(/\s+/).filter(w => w.length > 0).length;
+  const hasImages = /<img /i.test(rawHtml);
+  const hasTables = /<table/i.test(rawHtml);
+  const hasLists = /<[uo]l/i.test(rawHtml);
+  const internalLinks = (rawHtml.match(/href="https?:\/\/(goldesel\.de|goldeselblog\.de)[^"]*"/gi) || []).length;
+  const externalLinks = (rawHtml.match(/href="https?:\/\/(?!goldesel\.de|goldeselblog\.de)[^"]*"/gi) || []).length;
+
+  return {
+    id: post.id,
+    title: post.title?.rendered || '',
+    url: (post.link || '').replace('goldeselblog.de', 'goldesel.de'),
+    slug: post.slug,
+    date: post.date,
+    content: plainText,
+    contentHtml: rawHtml,
+    wordCount,
+    headings,
+    structure: {
+      h2Count: headings.filter(h => h.level === 'H2').length,
+      h3Count: headings.filter(h => h.level === 'H3').length,
+      hasImages,
+      hasTables,
+      hasLists,
+      internalLinks,
+      externalLinks,
+    },
+  };
+}
+
+// ─── WordPress: Publish a draft/pending post ──────────────────────────────
+async function publishPost(postId) {
+  if (!postId) throw new Error('postId parameter required');
+  const base = process.env.WP_URL;
+  const user = process.env.WP_USER;
+  const pass = process.env.WP_APP_PASS;
+  const auth = Buffer.from(`${user}:${pass}`).toString('base64');
+  const res = await fetch(`${base}/wp-json/wp/v2/posts/${postId}`, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Basic ${auth}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ status: 'publish' }),
+  });
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(`WP publish failed (${res.status}): ${err}`);
+  }
+  const post = await res.json();
+  return {
+    id: post.id,
+    title: post.title?.rendered || '',
+    status: post.status,
+    url: (post.link || '').replace('goldeselblog.de', 'goldesel.de'),
+  };
+}
+
 async function monthlyStats() {
   const client = getGA4Client();
   const now = new Date();
@@ -493,7 +607,10 @@ module.exports = async function handler(req, res) {
       case 'topstories':   data = await topstories();         break;
       case 'kpis':         data = await kpis();               break;
       case 'sources':      data = await sources();            break;
-      case 'articles':     data = await articles();           break;
+      case 'articles':           data = await articles();              break;
+      case 'reviewCandidates':   data = await reviewCandidates();      break;
+      case 'articleContent':     data = await articleContent(req.query.postId); break;
+      case 'publishPost':        data = await publishPost(req.query.postId);   break;
       case 'searchconsole':          data = await searchConsoleNews();        break;
       case 'searchconsoleNews':       data = await searchConsoleNews();        break;
       case 'searchconsoleAktienNews': data = await searchConsoleAktienNews();  break;

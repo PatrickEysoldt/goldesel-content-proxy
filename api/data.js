@@ -1,4 +1,5 @@
 const { BetaAnalyticsDataClient } = require('@google-analytics/data');
+const { google } = require('googleapis');
 
 // ─── GA4 Client ───────────────────────────────────────────────────────────────
 function getGA4Client() {
@@ -8,6 +9,19 @@ function getGA4Client() {
   return new BetaAnalyticsDataClient({ credentials });
 }
 
+// ─── Search Console Client ────────────────────────────────────────────────────
+function getSearchConsoleClient() {
+  const keyJson = process.env.GA4_SERVICE_ACCOUNT_JSON;
+  if (!keyJson) throw new Error('GA4_SERVICE_ACCOUNT_JSON not set');
+  const credentials = JSON.parse(keyJson);
+  const auth = new google.auth.GoogleAuth({
+    credentials,
+    scopes: ['https://www.googleapis.com/auth/webmasters.readonly'],
+  });
+  return google.searchconsole({ version: 'v1', auth });
+}
+
+const GSC_SITE = 'https://goldesel.de/';
 const propertyId = process.env.GA4_PROPERTY_ID;
 const TOPSTORY_CATEGORY_ID = 234;
 
@@ -246,6 +260,89 @@ async function newArticlesThisMonth() {
   };
 }
 
+// Search Console: Klicks, Impressionen, CTR, Position + Top Keywords + Top Seiten
+async function searchConsoleData() {
+  const sc = getSearchConsoleClient();
+  const now = new Date();
+  const endDate = fmtDate(now);
+  const startDate = fmtDate(new Date(now.getFullYear(), now.getMonth(), 1));
+  const firstDayThisMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+  const lastDayLastMonth = new Date(firstDayThisMonth - 1);
+  const firstDayLastMonth = new Date(lastDayLastMonth.getFullYear(), lastDayLastMonth.getMonth(), 1);
+  const prevStart = fmtDate(firstDayLastMonth);
+  const prevEnd = fmtDate(lastDayLastMonth);
+
+  // Zwei Pfade: /news/ und /aktien/news/
+  const pathFilters = ['/news/', '/aktien/news/'];
+
+  const makeFilter = (paths) => ({
+    filters: paths.map(p => ({ dimension: 'page', operator: 'contains', expression: p })),
+    groupType: 'or',
+  });
+
+  const [summaryRes, prevSummaryRes, keywordsRes, pagesRes] = await Promise.all([
+    sc.searchanalytics.query({
+      siteUrl: GSC_SITE,
+      requestBody: { startDate, endDate, dimensions: [], dimensionFilterGroups: [makeFilter(pathFilters)] },
+    }),
+    sc.searchanalytics.query({
+      siteUrl: GSC_SITE,
+      requestBody: { startDate: prevStart, endDate: prevEnd, dimensions: [], dimensionFilterGroups: [makeFilter(pathFilters)] },
+    }),
+    sc.searchanalytics.query({
+      siteUrl: GSC_SITE,
+      requestBody: {
+        startDate, endDate, dimensions: ['query'],
+        dimensionFilterGroups: [makeFilter(pathFilters)],
+        rowLimit: 10,
+        orderBy: [{ fieldName: 'clicks', sortOrder: 'DESCENDING' }],
+      },
+    }),
+    sc.searchanalytics.query({
+      siteUrl: GSC_SITE,
+      requestBody: {
+        startDate, endDate, dimensions: ['page'],
+        dimensionFilterGroups: [makeFilter(pathFilters)],
+        rowLimit: 10,
+        orderBy: [{ fieldName: 'clicks', sortOrder: 'DESCENDING' }],
+      },
+    }),
+  ]);
+
+  const s = summaryRes.data.rows?.[0] || { clicks: 0, impressions: 0, ctr: 0, position: 0 };
+  const p = prevSummaryRes.data.rows?.[0] || { clicks: 0, impressions: 0, ctr: 0, position: 0 };
+  const delta = (c, prev) => prev === 0 ? null : Math.round(((c - prev) / prev) * 100);
+
+  return {
+    summary: {
+      clicks: Math.round(s.clicks),
+      impressions: Math.round(s.impressions),
+      ctr: Math.round(s.ctr * 1000) / 10,
+      position: Math.round(s.position * 10) / 10,
+    },
+    delta: {
+      clicks: delta(s.clicks, p.clicks),
+      impressions: delta(s.impressions, p.impressions),
+      ctr: Math.round((s.ctr - p.ctr) * 1000) / 10,
+      position: Math.round((p.position - s.position) * 10) / 10,
+    },
+    keywords: keywordsRes.data.rows?.map(r => ({
+      keyword: r.keys[0],
+      clicks: Math.round(r.clicks),
+      impressions: Math.round(r.impressions),
+      ctr: Math.round(r.ctr * 1000) / 10,
+      position: Math.round(r.position * 10) / 10,
+    })) || [],
+    pages: pagesRes.data.rows?.map(r => ({
+      page: r.keys[0],
+      clicks: Math.round(r.clicks),
+      impressions: Math.round(r.impressions),
+      ctr: Math.round(r.ctr * 1000) / 10,
+      position: Math.round(r.position * 10) / 10,
+    })) || [],
+  };
+}
+
 // ─── Handler ──────────────────────────────────────────────────────────────────
 module.exports = async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -265,7 +362,7 @@ module.exports = async function handler(req, res) {
       case 'kpis':         data = await kpis();               break;
       case 'sources':      data = await sources();            break;
       case 'articles':     data = await articles();           break;
-      case 'monthlyStats': data = await monthlyStats();       break;
+      case 'searchconsole': data = await searchConsoleData();    break;
       case 'newArticles':  data = await newArticlesThisMonth(); break;
       default:
         return res.status(400).json({ error: `Unbekannte action. Verfügbar: top5, flop5, top5New, flop5New, topstories, kpis, sources, articles, monthlyStats, newArticles` });

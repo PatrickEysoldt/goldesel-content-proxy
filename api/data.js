@@ -94,12 +94,23 @@ async function getArticlesWithChannels({ startDate, endDate, wpQuery, limit = 10
   });
 
   return posts.map(p => {
-    const ga4Path = `/artikel/${p.slug}/`;
-    const data = viewMap[ga4Path] || viewMap[`/artikel/${p.slug}`] || { total: 0, channels: {} };
+    // goldesel.de/news/slug/ is the primary article path
+    const paths = [
+      `/news/${p.slug}/`,
+      `/news/${p.slug}`,
+      `/artikel/${p.slug}/`,
+      `/artikel/${p.slug}`,
+      `/${p.slug}/`,
+      `/${p.slug}`,
+    ];
+    let data = { total: 0, channels: {} };
+    for (const path of paths) {
+      if (viewMap[path]) { data = viewMap[path]; break; }
+    }
     return {
       title: p.title.rendered,
-      path: ga4Path,
-      url: p.link,
+      path: `/news/${p.slug}/`,
+      url: (p.link || '').replace('goldeselblog.de', 'goldesel.de'),
       slug: p.slug,
       date: p.date,
       pageviews: data.total,
@@ -117,7 +128,8 @@ async function top5() {
 
 async function flop5() {
   const articles = await getArticlesWithChannels({ startDate: '30daysAgo', endDate: 'today', limit: 100 });
-  return articles.filter(a => a.pageviews > 0).sort((a, b) => a.pageviews - b.pageviews).slice(0, 5);
+  // Include articles with 0 views — they are genuine flops (likely bad GA4 path match or no traffic)
+  return articles.sort((a, b) => a.pageviews - b.pageviews).slice(0, 5);
 }
 
 async function top5NewThisMonth() {
@@ -131,7 +143,7 @@ async function flop5NewThisMonth() {
   const now = new Date();
   const firstDay = new Date(now.getFullYear(), now.getMonth(), 1);
   const articles = await getArticlesWithChannels({ startDate: fmtDate(firstDay), endDate: fmtDate(now), limit: 100 });
-  return articles.filter(a => a.pageviews > 0).sort((a, b) => a.pageviews - b.pageviews).slice(0, 5);
+  return articles.sort((a, b) => a.pageviews - b.pageviews).slice(0, 5);
 }
 
 async function topstories() {
@@ -332,9 +344,9 @@ async function searchConsoleForPath(path, excludePath = null) {
   };
 }
 
-// /news/ aber NICHT /aktien/news/
+// Redaktionelle Artikel: goldesel.de/news/ aber NICHT /aktien/news/
 async function searchConsoleNews()       { return searchConsoleForPath('/news/', '/aktien/news/'); }
-// nur /aktien/news/
+// KI News: goldesel.de/aktien/news/
 async function searchConsoleAktienNews() { return searchConsoleForPath('/aktien/news/'); }
 // Debug: top pages without filter
 async function searchConsoleDebug() {

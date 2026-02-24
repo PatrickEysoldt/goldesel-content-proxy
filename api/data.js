@@ -260,8 +260,8 @@ async function newArticlesThisMonth() {
   };
 }
 
-// Search Console: Klicks, Impressionen, CTR, Position + Top Keywords + Top Seiten
-async function searchConsoleData() {
+// ─── Search Console Helper ────────────────────────────────────────────────────
+async function searchConsoleForPath(path) {
   const sc = getSearchConsoleClient();
   const now = new Date();
   const endDate = fmtDate(now);
@@ -272,38 +272,17 @@ async function searchConsoleData() {
   const prevStart = fmtDate(firstDayLastMonth);
   const prevEnd = fmtDate(lastDayLastMonth);
 
-  // Zwei Pfade: /news/ und /aktien/news/ – separate Queries dann zusammenführen
+  const filter = { filters: [{ dimension: 'page', operator: 'contains', expression: path }] };
 
-  const makeFilter = (path) => ({
-    filters: [{ dimension: 'page', operator: 'contains', expression: path }],
-  });
-
-  // Zwei separate Queries für /news/ und /aktien/news/, dann zusammenführen
-  const [summaryNews, summaryAktien, prevNews, prevAktien, keywordsRes, pagesRes] = await Promise.all([
-    sc.searchanalytics.query({ siteUrl: GSC_SITE, requestBody: { startDate, endDate, dimensions: [], dimensionFilterGroups: [makeFilter('/news/')] } }),
-    sc.searchanalytics.query({ siteUrl: GSC_SITE, requestBody: { startDate, endDate, dimensions: [], dimensionFilterGroups: [makeFilter('/aktien/news/')] } }),
-    sc.searchanalytics.query({ siteUrl: GSC_SITE, requestBody: { startDate: prevStart, endDate: prevEnd, dimensions: [], dimensionFilterGroups: [makeFilter('/news/')] } }),
-    sc.searchanalytics.query({ siteUrl: GSC_SITE, requestBody: { startDate: prevStart, endDate: prevEnd, dimensions: [], dimensionFilterGroups: [makeFilter('/aktien/news/')] } }),
-    sc.searchanalytics.query({ siteUrl: GSC_SITE, requestBody: { startDate, endDate, dimensions: ['query'], dimensionFilterGroups: [makeFilter('/news/')], rowLimit: 10, orderBy: [{ fieldName: 'clicks', sortOrder: 'DESCENDING' }] } }),
-    sc.searchanalytics.query({ siteUrl: GSC_SITE, requestBody: { startDate, endDate, dimensions: ['page'], dimensionFilterGroups: [makeFilter('/news/')], rowLimit: 10, orderBy: [{ fieldName: 'clicks', sortOrder: 'DESCENDING' }] } }),
+  const [summary, prevSummary, keywords, pages] = await Promise.all([
+    sc.searchanalytics.query({ siteUrl: GSC_SITE, requestBody: { startDate, endDate, dimensions: [], dimensionFilterGroups: [filter] } }),
+    sc.searchanalytics.query({ siteUrl: GSC_SITE, requestBody: { startDate: prevStart, endDate: prevEnd, dimensions: [], dimensionFilterGroups: [filter] } }),
+    sc.searchanalytics.query({ siteUrl: GSC_SITE, requestBody: { startDate, endDate, dimensions: ['query'], dimensionFilterGroups: [filter], rowLimit: 10, orderBy: [{ fieldName: 'clicks', sortOrder: 'DESCENDING' }] } }),
+    sc.searchanalytics.query({ siteUrl: GSC_SITE, requestBody: { startDate, endDate, dimensions: ['page'], dimensionFilterGroups: [filter], rowLimit: 10, orderBy: [{ fieldName: 'clicks', sortOrder: 'DESCENDING' }] } }),
   ]);
 
-  // Zusammenführen der Summary-Daten
-  const merge = (a, b) => {
-    const ra = a.data.rows?.[0] || { clicks: 0, impressions: 0, ctr: 0, position: 0 };
-    const rb = b.data.rows?.[0] || { clicks: 0, impressions: 0, ctr: 0, position: 0 };
-    const clicks = ra.clicks + rb.clicks;
-    const impressions = ra.impressions + rb.impressions;
-    return {
-      clicks,
-      impressions,
-      ctr: impressions > 0 ? clicks / impressions : 0,
-      position: (ra.position + rb.position) / 2,
-    };
-  };
-
-  const s = merge(summaryNews, summaryAktien);
-  const p = merge(prevNews, prevAktien);
+  const s = summary.data.rows?.[0] || { clicks: 0, impressions: 0, ctr: 0, position: 0 };
+  const p = prevSummary.data.rows?.[0] || { clicks: 0, impressions: 0, ctr: 0, position: 0 };
   const delta = (c, prev) => prev === 0 ? null : Math.round(((c - prev) / prev) * 100);
 
   return {
@@ -319,14 +298,14 @@ async function searchConsoleData() {
       ctr: Math.round((s.ctr - p.ctr) * 1000) / 10,
       position: Math.round((p.position - s.position) * 10) / 10,
     },
-    keywords: keywordsRes.data.rows?.map(r => ({
+    keywords: keywords.data.rows?.map(r => ({
       keyword: r.keys[0],
       clicks: Math.round(r.clicks),
       impressions: Math.round(r.impressions),
       ctr: Math.round(r.ctr * 1000) / 10,
       position: Math.round(r.position * 10) / 10,
     })) || [],
-    pages: pagesRes.data.rows?.map(r => ({
+    pages: pages.data.rows?.map(r => ({
       page: r.keys[0],
       clicks: Math.round(r.clicks),
       impressions: Math.round(r.impressions),
@@ -335,6 +314,9 @@ async function searchConsoleData() {
     })) || [],
   };
 }
+
+async function searchConsoleNews()       { return searchConsoleForPath('/news/'); }
+async function searchConsoleAktienNews() { return searchConsoleForPath('/aktien/news/'); }
 
 // ─── Handler ──────────────────────────────────────────────────────────────────
 module.exports = async function handler(req, res) {
@@ -355,7 +337,9 @@ module.exports = async function handler(req, res) {
       case 'kpis':         data = await kpis();               break;
       case 'sources':      data = await sources();            break;
       case 'articles':     data = await articles();           break;
-      case 'searchconsole': data = await searchConsoleData();    break;
+      case 'searchconsole':          data = await searchConsoleNews();        break;
+      case 'searchconsoleNews':       data = await searchConsoleNews();        break;
+      case 'searchconsoleAktienNews': data = await searchConsoleAktienNews();  break;
       case 'newArticles':  data = await newArticlesThisMonth(); break;
       default:
         return res.status(400).json({ error: `Unbekannte action. Verfügbar: top5, flop5, top5New, flop5New, topstories, kpis, sources, articles, monthlyStats, newArticles` });

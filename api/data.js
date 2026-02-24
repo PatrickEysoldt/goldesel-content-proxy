@@ -327,6 +327,79 @@ async function publishPost(postId) {
   };
 }
 
+// ─── KI-Review via Claude API (server-side proxy) ─────────────────────────
+async function aiReview(postId) {
+  if (!postId) throw new Error('postId parameter required');
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) throw new Error('ANTHROPIC_API_KEY not set in environment');
+
+  // Get full article content
+  const article = await articleContent(postId);
+
+  // Truncate if very long
+  const text = article.content.length > 12000
+    ? article.content.substring(0, 12000) + '\n[...gekürzt...]'
+    : article.content;
+
+  const systemPrompt = `Du bist ein SEO- und Content-Experte für Goldesel.de, eine deutsche Trading-Plattform. Analysiere den folgenden Artikel und gib ein strukturiertes Review. Bewerte auf einer Skala von 0-100. Antworte NUR mit dem JSON-Objekt, kein Markdown, keine Backticks.
+
+JSON Format:
+{
+  "score": 75,
+  "seoScore": 70,
+  "qualityScore": 80,
+  "productScore": 65,
+  "summary": "Kurze Gesamtbewertung in 2 Sätzen",
+  "strengths": ["Stärke 1", "Stärke 2", "Stärke 3"],
+  "weaknesses": ["Schwäche 1", "Schwäche 2"],
+  "seoImprovements": ["Konkreter SEO-Tipp 1", "Konkreter SEO-Tipp 2", "Konkreter SEO-Tipp 3"],
+  "contentImprovements": ["Inhaltlicher Verbesserungsvorschlag 1", "Vorschlag 2"],
+  "keywordSuggestions": ["Keyword 1", "Keyword 2", "Keyword 3"],
+  "metaTitleSuggestion": "Vorschlag für optimierten Meta-Title (max 60 Zeichen)",
+  "metaDescriptionSuggestion": "Vorschlag für Meta-Description (max 155 Zeichen)"
+}
+
+Bewertungskriterien:
+- SEO: Keyword-Dichte, Überschriften-Hierarchie, Meta-Potential, interne Verlinkung, Suchintent
+- Qualität: Lesbarkeit, Mehrwert, Struktur, Tiefe der Analyse, E-E-A-T Signale
+- Produktbezug: Relevanz für Goldesel-Nutzer, Premium-Konvertierungspotential, CTA-Möglichkeiten
+
+Kontext: Goldesel ist eine Trading-Plattform mit Free- und Premium-Modell. Content soll informieren UND konvertieren.`;
+
+  const userMsg = `Titel: ${article.title}\nURL: ${article.url}\nWörter: ${article.wordCount}\nH2: ${article.structure.h2Count} | H3: ${article.structure.h3Count} | Bilder: ${article.structure.hasImages} | Int. Links: ${article.structure.internalLinks} | Ext. Links: ${article.structure.externalLinks}\n\nÜberschriften:\n${article.headings.map(h => `${h.level}: ${h.text}`).join('\n')}\n\nVolltext:\n${text}`;
+
+  const response = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': apiKey,
+      'anthropic-version': '2023-06-01',
+    },
+    body: JSON.stringify({
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 1500,
+      system: systemPrompt,
+      messages: [{ role: 'user', content: userMsg }],
+    }),
+  });
+
+  if (!response.ok) {
+    const errText = await response.text();
+    throw new Error(`Claude API error (${response.status}): ${errText}`);
+  }
+
+  const data = await response.json();
+  const raw = data.content?.map(c => c.text || '').join('') || '';
+  const cleaned = raw.replace(/```json|```/g, '').trim();
+
+  try {
+    const review = JSON.parse(cleaned);
+    return { article, review };
+  } catch (e) {
+    throw new Error(`JSON parse error: ${cleaned.substring(0, 200)}`);
+  }
+}
+
 async function monthlyStats() {
   const client = getGA4Client();
   const now = new Date();
@@ -611,6 +684,7 @@ module.exports = async function handler(req, res) {
       case 'reviewCandidates':   data = await reviewCandidates();      break;
       case 'articleContent':     data = await articleContent(req.query.postId); break;
       case 'publishPost':        data = await publishPost(req.query.postId);   break;
+      case 'aiReview':           data = await aiReview(req.query.postId);      break;
       case 'searchconsole':          data = await searchConsoleNews();        break;
       case 'searchconsoleNews':       data = await searchConsoleNews();        break;
       case 'searchconsoleAktienNews': data = await searchConsoleAktienNews();  break;
@@ -618,7 +692,7 @@ module.exports = async function handler(req, res) {
       case 'monthlyStats': data = await monthlyStats();    break;
       case 'newArticles':  data = await newArticlesThisMonth(); break;
       default:
-        return res.status(400).json({ success: false, error: `Unbekannte action: "${action}". Verfügbar: top5, flop5, top5New, flop5New, topstories, kpis, sources, articles, monthlyStats, searchconsoleNews, searchconsoleAktienNews, newArticles` });
+        return res.status(400).json({ success: false, error: `Unbekannte action: "${action}". Verfügbar: top5, flop5, top5New, flop5New, topstories, kpis, sources, articles, monthlyStats, newArticles, searchconsoleNews, searchconsoleAktienNews, searchconsoleDebug, reviewCandidates, articleContent, publishPost` });
     }
     return res.status(200).json({ success: true, data });
   } catch (err) {

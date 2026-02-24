@@ -4,7 +4,8 @@
   "description": "Proxy server for GA4 and WordPress data",
   "main": "api/data.js",
   "dependencies": {
-    "@google-analytics/data": "^4.3.0"
+    "@google-analytics/data": "^4.3.0",
+    "googleapis": "^140.0.0"
   },
   "engines": {
     "node": ">=18"

@@ -213,6 +213,51 @@ async function articles() {
   return posts.map(p => ({ id: p.id, title: p.title.rendered, url: p.link, date: p.date, slug: p.slug }));
 }
 
+// Daily pageviews for last 30 days (for dashboard chart)
+async function dailyPageviews() {
+  const client = getGA4Client();
+  const [response] = await client.runReport({
+    property: propertyId,
+    dateRanges: [{ startDate: '30daysAgo', endDate: 'today' }],
+    dimensions: [{ name: 'date' }],
+    metrics: [
+      { name: 'screenPageViews' },
+      { name: 'sessions' },
+      { name: 'newUsers' },
+    ],
+    orderBys: [{ dimension: { dimensionName: 'date' }, desc: false }],
+  });
+  return (response.rows || []).map(row => ({
+    date: row.dimensionValues[0].value, // YYYYMMDD
+    pageviews: parseInt(row.metricValues[0].value),
+    sessions: parseInt(row.metricValues[1].value),
+    newUsers: parseInt(row.metricValues[2].value),
+  }));
+}
+
+// Top pages by channel for dashboard breakdown
+async function topPagesByChannel() {
+  const client = getGA4Client();
+  const [response] = await client.runReport({
+    property: propertyId,
+    dateRanges: [{ startDate: '30daysAgo', endDate: 'today' }],
+    dimensions: [
+      { name: 'sessionDefaultChannelGroup' },
+      { name: 'pagePath' },
+      { name: 'pageTitle' },
+    ],
+    metrics: [{ name: 'screenPageViews' }],
+    orderBys: [{ metric: { metricName: 'screenPageViews' }, desc: true }],
+    limit: 50,
+  });
+  return (response.rows || []).map(row => ({
+    channel: row.dimensionValues[0].value,
+    path: row.dimensionValues[1].value,
+    title: row.dimensionValues[2].value,
+    pageviews: parseInt(row.metricValues[0].value),
+  }));
+}
+
 // ─── Review: letzte Artikel mit Volltext für KI-Analyse ──────────────────────
 async function reviewCandidates() {
   // Letzte 15 veröffentlichte + alle drafts/pending
@@ -816,6 +861,8 @@ module.exports = async function handler(req, res) {
       case 'searchconsoleDebug':      data = await searchConsoleDebug();       break;
       case 'monthlyStats': data = await monthlyStats();    break;
       case 'newArticles':  data = await newArticlesThisMonth(); break;
+      case 'dailyPageviews': data = await dailyPageviews(); break;
+      case 'topPagesByChannel': data = await topPagesByChannel(); break;
       default:
         return res.status(400).json({ success: false, error: `Unbekannte action: "${action}". Verfügbar: top5, flop5, top5New, flop5New, topstories, kpis, sources, articles, monthlyStats, newArticles, searchconsoleNews, searchconsoleAktienNews, searchconsoleDebug, reviewCandidates, articleContent, publishPost, aiReview, aiAssist (POST), createPost (POST)` });
     }

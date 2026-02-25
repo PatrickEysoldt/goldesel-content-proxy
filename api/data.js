@@ -32,17 +32,17 @@ const propertyId = process.env.GA4_PROPERTY_ID;
 const TOPSTORY_CATEGORY_ID = 234;
 
 // ─── Batch: combine multiple actions in one serverless call ──────
-async function batch(actions) {
+async function batch(actions, range = '30daysAgo') {
   const results = {};
   const promises = actions.map(async (action) => {
     try {
       switch (action) {
-        case 'kpis': results.kpis = await kpis(); break;
-        case 'top5': results.top5 = await top5(); break;
-        case 'sources': results.sources = await sources(); break;
+        case 'kpis': results.kpis = await kpis(range); break;
+        case 'top5': results.top5 = await top5(range); break;
+        case 'sources': results.sources = await sources(range); break;
         case 'monthlyStats': results.monthlyStats = await monthlyStats(); break;
         case 'newArticles': results.newArticles = await newArticlesThisMonth(); break;
-        case 'dailyPageviews': results.dailyPageviews = await dailyPageviews(); break;
+        case 'dailyPageviews': results.dailyPageviews = await dailyPageviews(range); break;
         case 'reviewCandidates': results.reviewCandidates = await reviewCandidates(); break;
         case 'contentAnalysis': results.contentAnalysis = await contentAnalysis(); break;
         case 'contentAttribution': results.contentAttribution = await contentAttribution(); break;
@@ -234,13 +234,13 @@ async function getArticlesWithChannels({ startDate, endDate, wpQuery, limit = 10
 
 // ─── Actions ──────────────────────────────────────────────────────────────────
 
-async function top5() {
-  const articles = await getArticlesWithChannels({ startDate: '30daysAgo', endDate: 'today', limit: 100 });
+async function top5(range = '30daysAgo') {
+  const articles = await getArticlesWithChannels({ startDate: range, endDate: 'today', limit: 100 });
   return articles.sort((a, b) => b.pageviews - a.pageviews).slice(0, 5);
 }
 
-async function flop5() {
-  const articles = await getArticlesWithChannels({ startDate: '30daysAgo', endDate: 'today', limit: 100 });
+async function flop5(range = '30daysAgo') {
+  const articles = await getArticlesWithChannels({ startDate: range, endDate: 'today', limit: 100 });
   // Include articles with 0 views — they are genuine flops (likely bad GA4 path match or no traffic)
   return articles.sort((a, b) => a.pageviews - b.pageviews).slice(0, 5);
 }
@@ -285,11 +285,19 @@ async function topstories() {
   };
 }
 
-async function kpis() {
+async function kpis(range = '30daysAgo') {
   const client = getGA4Client();
+  // For comparison, use a "previous period" range
+  const daysMap = { '1daysAgo': 1, '7daysAgo': 7, '30daysAgo': 30, '90daysAgo': 90 };
+  const days = daysMap[range] || 30;
+  const prevRange = `${days * 2}daysAgo`;
+  
   const [response] = await client.runReport({
     property: propertyId,
-    dateRanges: [{ startDate: '30daysAgo', endDate: 'today' }],
+    dateRanges: [
+      { startDate: range, endDate: 'today' },
+      { startDate: prevRange, endDate: `${days}daysAgo` },
+    ],
     metrics: [
       { name: 'screenPageViews' },
       { name: 'sessions' },
@@ -298,19 +306,36 @@ async function kpis() {
     ],
   });
   const m = response.rows[0].metricValues;
-  return {
+  const result = {
     pageviews: parseInt(m[0].value),
     sessions: parseInt(m[1].value),
     newUsers: parseInt(m[2].value),
     totalUsers: parseInt(m[3].value),
   };
+  
+  // Calculate deltas from second date range if available
+  if (response.rows.length > 1) {
+    const prev = response.rows[1].metricValues;
+    const delta = (cur, prv) => {
+      const c = parseInt(cur), p = parseInt(prv);
+      if (!p) return null;
+      return Math.round(((c - p) / p) * 100);
+    };
+    result.delta = {
+      pageviews: delta(m[0].value, prev[0].value),
+      sessions: delta(m[1].value, prev[1].value),
+      newUsers: delta(m[2].value, prev[2].value),
+    };
+  }
+  
+  return result;
 }
 
-async function sources() {
+async function sources(range = '30daysAgo') {
   const client = getGA4Client();
   const [response] = await client.runReport({
     property: propertyId,
-    dateRanges: [{ startDate: '30daysAgo', endDate: 'today' }],
+    dateRanges: [{ startDate: range, endDate: 'today' }],
     dimensions: [{ name: 'sessionDefaultChannelGroup' }],
     metrics: [{ name: 'sessions' }],
     orderBys: [{ metric: { metricName: 'sessions' }, desc: true }],
@@ -474,11 +499,21 @@ async function contentAttribution() {
   };
 }
 
-async function dailyPageviews() {
+async function dailyPageviews(range = '30daysAgo') {
   const client = getGA4Client();
+  
+  // Calculate previous period for comparison
+  const daysMap = { '1daysAgo': 1, '7daysAgo': 7, '30daysAgo': 30, '90daysAgo': 90 };
+  const days = daysMap[range] || 30;
+  const prevStart = `${days * 2}daysAgo`;
+  const prevEnd = `${days + 1}daysAgo`;
+  
   const [response] = await client.runReport({
     property: propertyId,
-    dateRanges: [{ startDate: '30daysAgo', endDate: 'today' }],
+    dateRanges: [
+      { startDate: range, endDate: 'today' },
+      { startDate: prevStart, endDate: prevEnd },
+    ],
     dimensions: [{ name: 'date' }],
     metrics: [
       { name: 'screenPageViews' },
@@ -487,11 +522,72 @@ async function dailyPageviews() {
     ],
     orderBys: [{ dimension: { dimensionName: 'date' }, desc: false }],
   });
+  
+  const current = [];
+  const previous = [];
+  (response.rows || []).forEach(row => {
+    const dateRangeIdx = row.dimensionValues.length > 1 ? 0 : 0; // GA4 returns separate rows per date range
+    const entry = {
+      date: row.dimensionValues[0].value,
+      pageviews: parseInt(row.metricValues[0].value),
+      sessions: parseInt(row.metricValues[1].value),
+      newUsers: parseInt(row.metricValues[2].value),
+    };
+    current.push(entry);
+  });
+  
+  // GA4 with two date ranges: rows for 2nd range have metricValues at indices 3,4,5
+  // Actually GA4 returns dateRangeValues — let's use a separate call for previous
+  let prevData = [];
+  try {
+    const [prevResp] = await client.runReport({
+      property: propertyId,
+      dateRanges: [{ startDate: prevStart, endDate: prevEnd }],
+      dimensions: [{ name: 'date' }],
+      metrics: [
+        { name: 'screenPageViews' },
+        { name: 'sessions' },
+        { name: 'newUsers' },
+      ],
+      orderBys: [{ dimension: { dimensionName: 'date' }, desc: false }],
+    });
+    prevData = (prevResp.rows || []).map(row => ({
+      date: row.dimensionValues[0].value,
+      pageviews: parseInt(row.metricValues[0].value),
+      sessions: parseInt(row.metricValues[1].value),
+      newUsers: parseInt(row.metricValues[2].value),
+    }));
+  } catch (e) {
+    // Previous period fetch failed, not critical
+  }
+  
+  return { current, previous: prevData };
+}
+
+// Top articles for a specific date (for chart drill-down)
+async function topArticlesForDate(dateStr) {
+  // dateStr format: YYYYMMDD
+  const formatted = dateStr.replace(/(\d{4})(\d{2})(\d{2})/, '$1-$2-$3');
+  const client = getGA4Client();
+  const [response] = await client.runReport({
+    property: propertyId,
+    dateRanges: [{ startDate: formatted, endDate: formatted }],
+    dimensions: [{ name: 'pagePath' }, { name: 'pageTitle' }],
+    metrics: [{ name: 'screenPageViews' }, { name: 'newUsers' }],
+    dimensionFilter: {
+      filter: {
+        fieldName: 'pagePath',
+        stringFilter: { matchType: 'CONTAINS', value: '/news/' },
+      },
+    },
+    orderBys: [{ metric: { metricName: 'screenPageViews' }, desc: true }],
+    limit: 5,
+  });
   return (response.rows || []).map(row => ({
-    date: row.dimensionValues[0].value, // YYYYMMDD
+    path: row.dimensionValues[0].value,
+    title: row.dimensionValues[1].value,
     pageviews: parseInt(row.metricValues[0].value),
-    sessions: parseInt(row.metricValues[1].value),
-    newUsers: parseInt(row.metricValues[2].value),
+    newUsers: parseInt(row.metricValues[1].value),
   }));
 }
 
@@ -1075,6 +1171,89 @@ async function aiAssist(prompt, mode) {
   return { text, mode };
 }
 
+// ─── Image Generation (DALL-E 3) ────────────────────────────────────────────
+async function generateImage(prompt, style = 'vivid', size = '1792x1024') {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) throw new Error('OPENAI_API_KEY nicht gesetzt. Bitte in Vercel Environment Variables eintragen.');
+
+  const res = await fetch('https://api.openai.com/v1/images/generations', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      model: 'dall-e-3',
+      prompt,
+      n: 1,
+      size, // 1792x1024 (landscape, ideal for article headers)
+      style, // 'vivid' or 'natural'
+      response_format: 'b64_json',
+    }),
+  });
+
+  if (!res.ok) {
+    const errText = await res.text();
+    throw new Error(`OpenAI Image API ${res.status}: ${errText.substring(0, 300)}`);
+  }
+
+  const json = await res.json();
+  const imageData = json.data?.[0];
+  return {
+    b64: imageData.b64_json,
+    revisedPrompt: imageData.revised_prompt,
+  };
+}
+
+// Upload image to WordPress Media Library
+async function uploadWPMedia(b64Data, filename, mimeType = 'image/png') {
+  const base = process.env.WP_URL;
+  const user = process.env.WP_USER;
+  const pass = process.env.WP_APP_PASS;
+  const auth = Buffer.from(`${user}:${pass}`).toString('base64');
+
+  const buffer = Buffer.from(b64Data, 'base64');
+
+  const res = await fetch(`${base}/wp-json/wp/v2/media`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Basic ${auth}`,
+      'Content-Type': mimeType,
+      'Content-Disposition': `attachment; filename="${filename}"`,
+    },
+    body: buffer,
+  });
+
+  if (!res.ok) {
+    const errText = await res.text();
+    throw new Error(`WP Media Upload ${res.status}: ${errText.substring(0, 200)}`);
+  }
+
+  const media = await res.json();
+  return {
+    id: media.id,
+    url: media.source_url,
+    link: media.link,
+  };
+}
+
+// Generate image + optionally upload to WP
+async function generateArticleImage(prompt, style = 'vivid', uploadToWP = false, filename = 'article-image.png') {
+  const image = await generateImage(prompt, style);
+  
+  let wpMedia = null;
+  if (uploadToWP) {
+    wpMedia = await uploadWPMedia(image.b64, filename);
+  }
+
+  return {
+    imageBase64: image.b64.substring(0, 100) + '...', // Don't send full b64 back, too large
+    imageDataUrl: `data:image/png;base64,${image.b64}`,
+    revisedPrompt: image.revisedPrompt,
+    wpMedia,
+  };
+}
+
 // ─── Create WP Post ──────────────────────────────────────────────────────────
 async function createWPPost(title, content, status = 'draft', options = {}) {
   const base = process.env.WP_URL;
@@ -1093,6 +1272,7 @@ async function createWPPost(title, content, status = 'draft', options = {}) {
   if (options.tags && options.tags.length) postData.tags = options.tags;
   if (options.excerpt) postData.excerpt = options.excerpt;
   if (options.slug) postData.slug = options.slug;
+  if (options.featured_media) postData.featured_media = options.featured_media;
 
   const res = await fetch(`${base}/wp-json/wp/v2/posts`, {
     method: 'POST',
@@ -1135,16 +1315,16 @@ module.exports = async function handler(req, res) {
       case 'batch': {
         const actions = (req.query.actions || '').split(',').filter(Boolean);
         if (!actions.length) throw new Error('actions parameter required (comma-separated)');
-        data = await batch(actions);
+        data = await batch(actions, req.query.range || '30daysAgo');
         break;
       }
-      case 'top5':         data = await top5();               break;
-      case 'flop5':        data = await flop5();              break;
+      case 'top5':         data = await top5(req.query.range || '30daysAgo');               break;
+      case 'flop5':        data = await flop5(req.query.range || '30daysAgo');              break;
       case 'top5New':      data = await top5NewThisMonth();   break;
       case 'flop5New':     data = await flop5NewThisMonth();  break;
       case 'topstories':   data = await topstories();         break;
-      case 'kpis':         data = await kpis();               break;
-      case 'sources':      data = await sources();            break;
+      case 'kpis':         data = await kpis(req.query.range || '30daysAgo');               break;
+      case 'sources':      data = await sources(req.query.range || '30daysAgo');            break;
       case 'articles':           data = await articles();              break;
       case 'reviewCandidates':   data = await reviewCandidates();      break;
       case 'articleContent':     data = await articleContent(req.query.postId); break;
@@ -1156,14 +1336,17 @@ module.exports = async function handler(req, res) {
         tags: body.tags,
         excerpt: body.excerpt,
         slug: body.slug,
+        featured_media: body.featured_media,
       }); break;
+      case 'generateImage':      data = await generateArticleImage(body.prompt, body.style || 'vivid', body.uploadToWP !== false, body.filename || 'article-image.png'); break;
+      case 'topArticlesForDate': data = await topArticlesForDate(req.query.date); break;
       case 'searchconsole':          data = await searchConsoleNews();        break;
       case 'searchconsoleNews':       data = await searchConsoleNews();        break;
       case 'searchconsoleAktienNews': data = await searchConsoleAktienNews();  break;
       case 'searchconsoleDebug':      data = await searchConsoleDebug();       break;
       case 'monthlyStats': data = await monthlyStats();    break;
       case 'newArticles':  data = await newArticlesThisMonth(); break;
-      case 'dailyPageviews': data = await dailyPageviews(); break;
+      case 'dailyPageviews': data = await dailyPageviews(req.query.range || '30daysAgo'); break;
       case 'topPagesByChannel': data = await topPagesByChannel(); break;
       case 'contentAnalysis': data = await contentAnalysis(); break;
       case 'contentAttribution': data = await contentAttribution(); break;

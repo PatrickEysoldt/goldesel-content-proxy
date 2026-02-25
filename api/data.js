@@ -45,6 +45,7 @@ async function batch(actions) {
         case 'dailyPageviews': results.dailyPageviews = await dailyPageviews(); break;
         case 'reviewCandidates': results.reviewCandidates = await reviewCandidates(); break;
         case 'contentAnalysis': results.contentAnalysis = await contentAnalysis(); break;
+        case 'contentAttribution': results.contentAttribution = await contentAttribution(); break;
       }
     } catch (err) {
       results[action] = { _error: err.message };
@@ -367,6 +368,94 @@ async function contentAnalysis() {
   const totalPV = allArticles.reduce((s, a) => s + a.pageviews, 0);
 
   return { categories, totalArticles: total, totalPageviews: totalPV, period: '90 Tage' };
+}
+
+// ─── Content Attribution + Engagement ────────────────────────────────────────
+async function contentAttribution() {
+  const client = getGA4Client();
+
+  // 1. Get landing page data with engagement metrics
+  const [response] = await client.runReport({
+    property: propertyId,
+    dateRanges: [{ startDate: '30daysAgo', endDate: 'today' }],
+    dimensions: [{ name: 'landingPagePlusQueryString' }],
+    metrics: [
+      { name: 'newUsers' },
+      { name: 'sessions' },
+      { name: 'screenPageViews' },
+      { name: 'averageSessionDuration' },
+      { name: 'bounceRate' },
+      { name: 'engagementRate' },
+    ],
+    dimensionFilter: {
+      filter: {
+        fieldName: 'landingPagePlusQueryString',
+        stringFilter: { matchType: 'CONTAINS', value: '/news/' },
+      },
+    },
+    orderBys: [{ metric: { metricName: 'newUsers' }, desc: true }],
+    limit: 50,
+  });
+
+  const articles = (response.rows || []).map(row => {
+    const path = row.dimensionValues[0].value;
+    const slug = path.split('/').filter(Boolean).pop() || path;
+    return {
+      path,
+      slug,
+      title: decodeURIComponent(slug).replace(/-/g, ' '),
+      newUsers: parseInt(row.metricValues[0].value),
+      sessions: parseInt(row.metricValues[1].value),
+      pageviews: parseInt(row.metricValues[2].value),
+      avgSessionDuration: parseFloat(row.metricValues[3].value).toFixed(0),
+      bounceRate: (parseFloat(row.metricValues[4].value) * 100).toFixed(1),
+      engagementRate: (parseFloat(row.metricValues[5].value) * 100).toFixed(1),
+    };
+  });
+
+  // 2. Get titles from WP for top articles
+  try {
+    const slugs = articles.slice(0, 30).map(a => a.slug);
+    const wpArticles = await wpFetch(`posts?per_page=30&status=publish&slug=${slugs.join(',')}&_fields=slug,title,content`);
+    const titleMap = {};
+    const ctaMap = {};
+    wpArticles.forEach(p => {
+      titleMap[p.slug] = p.title.rendered;
+      // CTA detection: check if article content contains common CTA patterns
+      const content = (p.content?.rendered || '').toLowerCase();
+      ctaMap[p.slug] = {
+        hasCTA: content.includes('premium') || content.includes('jetzt testen') || content.includes('kostenlos') || content.includes('registrier') || content.includes('anmeld') || content.includes('goldesel.de/premium') || content.includes('cta') || content.includes('signup'),
+        hasProductMention: content.includes('goldesel') && (content.includes('tool') || content.includes('plattform') || content.includes('analyse') || content.includes('signal') || content.includes('watchlist')),
+        hasInternalLinks: (content.match(/href="https?:\/\/(goldesel\.de|goldeselblog\.de)[^"]*"/gi) || []).length,
+      };
+    });
+    articles.forEach(a => {
+      if (titleMap[a.slug]) a.title = titleMap[a.slug];
+      if (ctaMap[a.slug]) a.cta = ctaMap[a.slug];
+    });
+  } catch (err) {
+    // WP enrichment failed, continue with GA4 data only
+  }
+
+  // 3. Summary stats
+  const totalNewUsers = articles.reduce((s, a) => s + a.newUsers, 0);
+  const totalSessions = articles.reduce((s, a) => s + a.sessions, 0);
+  const avgEngagement = articles.length ? (articles.reduce((s, a) => s + parseFloat(a.engagementRate), 0) / articles.length).toFixed(1) : '0';
+  const withCTA = articles.filter(a => a.cta?.hasCTA).length;
+  const withoutCTA = articles.filter(a => a.cta && !a.cta.hasCTA).length;
+
+  return {
+    articles,
+    summary: {
+      totalNewUsers,
+      totalSessions,
+      avgEngagement,
+      articleCount: articles.length,
+      withCTA,
+      withoutCTA,
+    },
+    period: '30 Tage',
+  };
 }
 
 async function dailyPageviews() {
@@ -1061,6 +1150,7 @@ module.exports = async function handler(req, res) {
       case 'dailyPageviews': data = await dailyPageviews(); break;
       case 'topPagesByChannel': data = await topPagesByChannel(); break;
       case 'contentAnalysis': data = await contentAnalysis(); break;
+      case 'contentAttribution': data = await contentAttribution(); break;
       default:
         return res.status(400).json({ success: false, error: `Unbekannte action: "${action}". Verfügbar: top5, flop5, top5New, flop5New, topstories, kpis, sources, articles, monthlyStats, newArticles, searchconsoleNews, searchconsoleAktienNews, searchconsoleDebug, reviewCandidates, articleContent, publishPost, aiReview, aiAssist (POST), createPost (POST)` });
     }

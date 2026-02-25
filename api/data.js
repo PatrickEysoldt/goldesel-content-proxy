@@ -1366,6 +1366,59 @@ async function fetchNewsTrends() {
   return results;
 }
 
+// Google Trends: Explore a specific query (related queries + interest)
+async function exploreTrend(query) {
+  try {
+    // Use Google Trends autocomplete/related for exploration
+    const encodedQuery = encodeURIComponent(query);
+    
+    // Fetch related queries via Google Trends explore API (public endpoint)
+    const relatedUrl = `https://trends.google.com/trends/api/widgetdata/relatedsearches?hl=de&tz=-60&req=${encodeURIComponent(JSON.stringify({
+      restriction: { geo: { country: 'DE' }, time: 'today 3-m' },
+      keywordType: 'QUERY',
+      metric: ['TOP', 'RISING'],
+      trendinessSettings: { compareTime: '2025-11-25 2026-02-25' },
+      requestOptions: { property: '', backend: 'IZG', category: 7 },
+      language: 'de',
+      userCountryCode: 'DE',
+    })}&token=unused`;
+    
+    // Simpler approach: use Google search suggest for related finance terms
+    const suggestUrl = `https://suggestqueries.google.com/complete/search?client=firefox&q=${encodedQuery}+aktie&hl=de`;
+    const suggestRes = await fetch(suggestUrl, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
+    });
+    
+    let suggestions = [];
+    if (suggestRes.ok) {
+      const data = await suggestRes.json();
+      suggestions = (data[1] || []).slice(0, 8);
+    }
+    
+    // Also search Google News for this specific query
+    const newsUrl = `https://news.google.com/rss/search?q=${encodedQuery}+aktie+OR+börse&hl=de&gl=DE&ceid=DE:de`;
+    const newsRes = await fetch(newsUrl, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
+    });
+    
+    let relatedNews = [];
+    if (newsRes.ok) {
+      const xml = await newsRes.text();
+      const items = [...xml.matchAll(/<item>[\s\S]*?<title>([^<]+)<\/title>[\s\S]*?<pubDate>([^<]*)<\/pubDate>[\s\S]*?(?:<source[^>]*>([^<]*)<\/source>)?[\s\S]*?<\/item>/g)];
+      relatedNews = items.slice(0, 6).map(m => ({
+        title: m[1].replace(/&amp;/g, '&').replace(/&quot;/g, '"').replace(/&#39;/g, "'"),
+        pubDate: m[2],
+        source: m[3] || '',
+        hoursAgo: Math.round((Date.now() - new Date(m[2]).getTime()) / 3600000),
+      }));
+    }
+    
+    return { query, suggestions, relatedNews };
+  } catch (err) {
+    return { query, suggestions: [], relatedNews: [], error: err.message };
+  }
+}
+
 // Aggregate + optional AI analysis
 async function trendRadar(analyze = false) {
   // Fetch all sources in parallel (with timeouts so one failure doesn't block)
@@ -1665,6 +1718,7 @@ module.exports = async function handler(req, res) {
       case 'aiReview':           data = await aiReview(req.query.postId);      break;
       case 'smartRanking':       data = await smartRanking(req.query.range || '30daysAgo', parseInt(req.query.limit) || 30); break;
       case 'trendRadar':         data = await trendRadar(req.query.analyze === 'true'); break;
+      case 'exploreTrend':       data = await exploreTrend(req.query.q || ''); break;
       case 'aiAssist':           data = await aiAssist(body.prompt, body.mode); break;
       case 'createPost':         data = await createWPPost(body.title, body.content, body.status || 'draft', {
         categories: body.categories,

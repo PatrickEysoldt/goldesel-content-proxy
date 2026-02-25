@@ -1,16 +1,21 @@
 const { BetaAnalyticsDataClient } = require('@google-analytics/data');
 const { google } = require('googleapis');
 
-// ─── GA4 Client ───────────────────────────────────────────────────────────────
+// ─── GA4 Client (cached per cold start) ──────────────────────────────────────
+let _ga4Client = null;
 function getGA4Client() {
+  if (_ga4Client) return _ga4Client;
   const keyJson = process.env.GA4_SERVICE_ACCOUNT_JSON;
   if (!keyJson) throw new Error('GA4_SERVICE_ACCOUNT_JSON not set');
   const credentials = JSON.parse(keyJson);
-  return new BetaAnalyticsDataClient({ credentials });
+  _ga4Client = new BetaAnalyticsDataClient({ credentials });
+  return _ga4Client;
 }
 
-// ─── Search Console Client ────────────────────────────────────────────────────
+// ─── Search Console Client (cached per cold start) ───────────────────────────
+let _gscClient = null;
 function getSearchConsoleClient() {
+  if (_gscClient) return _gscClient;
   const keyJson = process.env.GA4_SERVICE_ACCOUNT_JSON;
   if (!keyJson) throw new Error('GA4_SERVICE_ACCOUNT_JSON not set');
   const credentials = JSON.parse(keyJson);
@@ -18,12 +23,36 @@ function getSearchConsoleClient() {
     credentials,
     scopes: ['https://www.googleapis.com/auth/webmasters.readonly'],
   });
-  return google.searchconsole({ version: 'v1', auth });
+  _gscClient = google.searchconsole({ version: 'v1', auth });
+  return _gscClient;
 }
 
 const GSC_SITE = 'https://goldesel.de/';
 const propertyId = process.env.GA4_PROPERTY_ID;
 const TOPSTORY_CATEGORY_ID = 234;
+
+// ─── Batch: combine multiple actions in one serverless call ──────
+async function batch(actions) {
+  const results = {};
+  const promises = actions.map(async (action) => {
+    try {
+      switch (action) {
+        case 'kpis': results.kpis = await kpis(); break;
+        case 'top5': results.top5 = await top5(); break;
+        case 'sources': results.sources = await sources(); break;
+        case 'monthlyStats': results.monthlyStats = await monthlyStats(); break;
+        case 'newArticles': results.newArticles = await newArticlesThisMonth(); break;
+        case 'dailyPageviews': results.dailyPageviews = await dailyPageviews(); break;
+        case 'reviewCandidates': results.reviewCandidates = await reviewCandidates(); break;
+        case 'contentAnalysis': results.contentAnalysis = await contentAnalysis(); break;
+      }
+    } catch (err) {
+      results[action] = { _error: err.message };
+    }
+  });
+  await Promise.all(promises);
+  return results;
+}
 
 // ─── WordPress Helper ─────────────────────────────────────────────────────────
 async function wpFetch(path) {
@@ -884,6 +913,12 @@ module.exports = async function handler(req, res) {
   try {
     let data;
     switch (action) {
+      case 'batch': {
+        const actions = (req.query.actions || '').split(',').filter(Boolean);
+        if (!actions.length) throw new Error('actions parameter required (comma-separated)');
+        data = await batch(actions);
+        break;
+      }
       case 'top5':         data = await top5();               break;
       case 'flop5':        data = await flop5();              break;
       case 'top5New':      data = await top5NewThisMonth();   break;

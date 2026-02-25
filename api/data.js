@@ -216,22 +216,33 @@ async function articles() {
 // ─── Review: letzte Artikel mit Volltext für KI-Analyse ──────────────────────
 async function reviewCandidates() {
   // Letzte 15 veröffentlichte + alle drafts/pending
+  // Include yoast_head_json for SEO meta (Yoast REST API extension)
   const [published, drafts, pending] = await Promise.all([
-    wpFetch('posts?per_page=15&status=publish&orderby=date&order=desc&_fields=id,title,link,date,slug,categories,author,excerpt'),
-    wpFetch('posts?per_page=10&status=draft&orderby=date&order=desc&_fields=id,title,link,date,slug,categories,author,excerpt').catch(() => []),
-    wpFetch('posts?per_page=10&status=pending&orderby=date&order=desc&_fields=id,title,link,date,slug,categories,author,excerpt').catch(() => []),
+    wpFetch('posts?per_page=15&status=publish&orderby=date&order=desc&_fields=id,title,link,date,slug,categories,author,excerpt,yoast_head_json,meta'),
+    wpFetch('posts?per_page=10&status=draft&orderby=date&order=desc&_fields=id,title,link,date,slug,categories,author,excerpt,yoast_head_json,meta').catch(() => []),
+    wpFetch('posts?per_page=10&status=pending&orderby=date&order=desc&_fields=id,title,link,date,slug,categories,author,excerpt,yoast_head_json,meta').catch(() => []),
   ]);
 
-  const mapPost = (p, status) => ({
-    id: p.id,
-    title: p.title.rendered,
-    url: (p.link || '').replace('goldeselblog.de', 'goldesel.de'),
-    date: p.date,
-    slug: p.slug,
-    excerpt: (p.excerpt?.rendered || '').replace(/<[^>]*>/g, '').trim().substring(0, 200),
-    wpStatus: status,
-    categories: p.categories || [],
-  });
+  const mapPost = (p, status) => {
+    // Yoast exposes data via yoast_head_json (REST API v2) or meta fields
+    const yoast = p.yoast_head_json || {};
+    const meta = p.meta || {};
+    return {
+      id: p.id,
+      title: p.title.rendered,
+      url: (p.link || '').replace('goldeselblog.de', 'goldesel.de'),
+      date: p.date,
+      slug: p.slug,
+      excerpt: (p.excerpt?.rendered || '').replace(/<[^>]*>/g, '').trim().substring(0, 200),
+      wpStatus: status,
+      categories: p.categories || [],
+      // Yoast SEO fields
+      focusKeyword: meta._yoast_wpseo_focuskw || meta.yoast_wpseo_focuskw || yoast.focuskw || '',
+      seoTitle: yoast.title || meta._yoast_wpseo_title || '',
+      seoDescription: yoast.og_description || yoast.description || meta._yoast_wpseo_metadesc || '',
+      seoScore: yoast.schema?.mainEntityOfPage?.['@type'] || '',
+    };
+  };
 
   return [
     ...pending.map(p => mapPost(p, 'pending')),
@@ -240,10 +251,10 @@ async function reviewCandidates() {
   ];
 }
 
-// Volltext eines einzelnen Artikels für KI-Review
+// Volltext eines einzelnen Artikels für KI-Review (inkl. Yoast SEO Meta)
 async function articleContent(postId) {
   if (!postId) throw new Error('postId parameter required');
-  const post = await wpFetch(`posts/${postId}?_fields=id,title,content,excerpt,slug,link,date,categories,author`);
+  const post = await wpFetch(`posts/${postId}?_fields=id,title,content,excerpt,slug,link,date,categories,author,yoast_head_json,meta`);
   // HTML-Tags entfernen für sauberen Text
   const rawHtml = post.content?.rendered || '';
   const plainText = rawHtml
@@ -277,6 +288,13 @@ async function articleContent(postId) {
   const internalLinks = (rawHtml.match(/href="https?:\/\/(goldesel\.de|goldeselblog\.de)[^"]*"/gi) || []).length;
   const externalLinks = (rawHtml.match(/href="https?:\/\/(?!goldesel\.de|goldeselblog\.de)[^"]*"/gi) || []).length;
 
+  // Yoast SEO data
+  const yoast = post.yoast_head_json || {};
+  const meta = post.meta || {};
+  const focusKeyword = meta._yoast_wpseo_focuskw || meta.yoast_wpseo_focuskw || yoast.focuskw || '';
+  const seoTitle = yoast.title || meta._yoast_wpseo_title || '';
+  const seoDescription = yoast.og_description || yoast.description || meta._yoast_wpseo_metadesc || '';
+
   return {
     id: post.id,
     title: post.title?.rendered || '',
@@ -295,6 +313,11 @@ async function articleContent(postId) {
       hasLists,
       internalLinks,
       externalLinks,
+    },
+    seo: {
+      focusKeyword,
+      seoTitle,
+      seoDescription,
     },
   };
 }
@@ -333,15 +356,31 @@ async function aiReview(postId) {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) throw new Error('ANTHROPIC_API_KEY not set in environment');
 
-  // Get full article content
+  // Get full article content (now includes Yoast SEO data)
   const article = await articleContent(postId);
+  const focusKW = article.seo?.focusKeyword || '';
 
   // Truncate if very long
   const text = article.content.length > 12000
     ? article.content.substring(0, 12000) + '\n[...gekürzt...]'
     : article.content;
 
+  // Build keyword-aware prompt
+  const keywordBlock = focusKW
+    ? `\n\nWICHTIG — FOKUS-KEYWORD: "${focusKW}"
+Das Fokus-Keyword wurde vom Redakteur in Yoast SEO hinterlegt. Prüfe speziell:
+- Kommt das Fokus-Keyword im H1/Title vor?
+- Kommt es in der Meta Description vor?
+- Kommt es in mindestens einer H2 vor?
+- Kommt es in den ersten 100 Wörtern des Textes vor?
+- Wie oft kommt es insgesamt vor? (ideal: 0.5-1.5% Keyword-Dichte)
+- Gibt es sinnvolle Variationen/Synonyme des Keywords im Text?
+- Ist das Keyword im URL-Slug enthalten?
+Gib eine separate "keywordAnalysis" mit Ergebnis.`
+    : '\n\nHINWEIS: Kein Fokus-Keyword in Yoast hinterlegt. Schlage ein geeignetes Fokus-Keyword vor.';
+
   const systemPrompt = `Du bist ein SEO- und Content-Experte für Goldesel.de, eine deutsche Trading-Plattform. Analysiere den folgenden Artikel und gib ein strukturiertes Review. Bewerte auf einer Skala von 0-100. Antworte NUR mit dem JSON-Objekt, kein Markdown, keine Backticks.
+${keywordBlock}
 
 JSON Format:
 {
@@ -355,18 +394,34 @@ JSON Format:
   "seoImprovements": ["Konkreter SEO-Tipp 1", "Konkreter SEO-Tipp 2", "Konkreter SEO-Tipp 3"],
   "contentImprovements": ["Inhaltlicher Verbesserungsvorschlag 1", "Vorschlag 2"],
   "keywordSuggestions": ["Keyword 1", "Keyword 2", "Keyword 3"],
-  "metaTitleSuggestion": "Vorschlag für optimierten Meta-Title (max 60 Zeichen)",
-  "metaDescriptionSuggestion": "Vorschlag für Meta-Description (max 155 Zeichen)"
+  "keywordAnalysis": {
+    "focusKeyword": "${focusKW || '(keins gesetzt)'}",
+    "inTitle": true,
+    "inMetaDesc": true,
+    "inH2": true,
+    "inFirst100Words": true,
+    "inSlug": true,
+    "occurrences": 5,
+    "density": "0.8%",
+    "verdict": "Keyword gut platziert / Keyword fehlt in wichtigen Positionen / etc.",
+    "suggestedKeyword": "Falls kein Fokus-KW gesetzt: Vorschlag hier"
+  },
+  "metaTitleSuggestion": "Vorschlag für optimierten Meta-Title (max 60 Zeichen, Fokus-Keyword am Anfang!)",
+  "metaDescriptionSuggestion": "Vorschlag für Meta-Description (max 155 Zeichen, Fokus-Keyword enthalten!)"
 }
 
 Bewertungskriterien:
-- SEO: Keyword-Dichte, Überschriften-Hierarchie, Meta-Potential, interne Verlinkung, Suchintent
+- SEO: Keyword-Optimierung (Fokus-Keyword!), Überschriften-Hierarchie, Meta-Potential, interne Verlinkung, Suchintent
 - Qualität: Lesbarkeit, Mehrwert, Struktur, Tiefe der Analyse, E-E-A-T Signale
 - Produktbezug: Relevanz für Goldesel-Nutzer, Premium-Konvertierungspotential, CTA-Möglichkeiten
 
 Kontext: Goldesel ist eine Trading-Plattform mit Free- und Premium-Modell. Content soll informieren UND konvertieren.`;
 
-  const userMsg = `Titel: ${article.title}\nURL: ${article.url}\nWörter: ${article.wordCount}\nH2: ${article.structure.h2Count} | H3: ${article.structure.h3Count} | Bilder: ${article.structure.hasImages} | Int. Links: ${article.structure.internalLinks} | Ext. Links: ${article.structure.externalLinks}\n\nÜberschriften:\n${article.headings.map(h => `${h.level}: ${h.text}`).join('\n')}\n\nVolltext:\n${text}`;
+  const seoMetaLine = focusKW ? `Fokus-Keyword (Yoast): ${focusKW}` : 'Fokus-Keyword: NICHT GESETZT';
+  const yoastMeta = article.seo?.seoTitle ? `\nYoast Meta-Title: ${article.seo.seoTitle}` : '';
+  const yoastDesc = article.seo?.seoDescription ? `\nYoast Meta-Desc: ${article.seo.seoDescription}` : '';
+
+  const userMsg = `Titel: ${article.title}\nURL: ${article.url}\nSlug: ${article.slug}\n${seoMetaLine}${yoastMeta}${yoastDesc}\nWörter: ${article.wordCount}\nH2: ${article.structure.h2Count} | H3: ${article.structure.h3Count} | Bilder: ${article.structure.hasImages} | Int. Links: ${article.structure.internalLinks} | Ext. Links: ${article.structure.externalLinks}\n\nÜberschriften:\n${article.headings.map(h => `${h.level}: ${h.text}`).join('\n')}\n\nVolltext:\n${text}`;
 
   const response = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
@@ -377,7 +432,7 @@ Kontext: Goldesel ist eine Trading-Plattform mit Free- und Premium-Modell. Conte
     },
     body: JSON.stringify({
       model: 'claude-sonnet-4-20250514',
-      max_tokens: 1500,
+      max_tokens: 2000,
       system: systemPrompt,
       messages: [{ role: 'user', content: userMsg }],
     }),

@@ -215,6 +215,52 @@ async function articles() {
 
 // Daily pageviews for last 30 days (for dashboard chart)
 async function dailyPageviews() {
+
+// Content category analysis for strategy page
+async function contentAnalysis() {
+  // Fetch articles by WP category with GA4 performance
+  const allArticles = await getArticlesWithChannels({ startDate: '90daysAgo', endDate: 'today', limit: 200 });
+
+  // Also get categories from WP
+  const cats = await wpFetch('categories?per_page=50&_fields=id,name,count,slug');
+  const catMap = {};
+  cats.forEach(c => { catMap[c.id] = c; });
+
+  // Group articles by their WP categories
+  const categoryPerformance = {};
+  allArticles.forEach(a => {
+    (a.categories || []).forEach(catId => {
+      const cat = catMap[catId];
+      if (!cat) return;
+      if (!categoryPerformance[cat.name]) {
+        categoryPerformance[cat.name] = { name: cat.name, slug: cat.slug, count: 0, totalPageviews: 0, articles: [], channels: {} };
+      }
+      const cp = categoryPerformance[cat.name];
+      cp.count++;
+      cp.totalPageviews += a.pageviews;
+      cp.articles.push({ title: a.title, pageviews: a.pageviews, path: a.path });
+      Object.entries(a.channels || {}).forEach(([ch, v]) => {
+        cp.channels[ch] = (cp.channels[ch] || 0) + v;
+      });
+    });
+  });
+
+  // Calculate averages and sort
+  const categories = Object.values(categoryPerformance).map(c => ({
+    ...c,
+    avgPageviews: c.count > 0 ? Math.round(c.totalPageviews / c.count) : 0,
+    topChannel: Object.entries(c.channels).sort((a, b) => b[1] - a[1])[0]?.[0] || '—',
+    articles: c.articles.sort((a, b) => b.pageviews - a.pageviews).slice(0, 3), // top 3 per category
+  })).sort((a, b) => b.totalPageviews - a.totalPageviews);
+
+  // Overall stats
+  const total = allArticles.length;
+  const totalPV = allArticles.reduce((s, a) => s + a.pageviews, 0);
+
+  return { categories, totalArticles: total, totalPageviews: totalPV, period: '90 Tage' };
+}
+
+async function dailyPageviews() {
   const client = getGA4Client();
   const [response] = await client.runReport({
     property: propertyId,
@@ -863,6 +909,7 @@ module.exports = async function handler(req, res) {
       case 'newArticles':  data = await newArticlesThisMonth(); break;
       case 'dailyPageviews': data = await dailyPageviews(); break;
       case 'topPagesByChannel': data = await topPagesByChannel(); break;
+      case 'contentAnalysis': data = await contentAnalysis(); break;
       default:
         return res.status(400).json({ success: false, error: `Unbekannte action: "${action}". Verfügbar: top5, flop5, top5New, flop5New, topstories, kpis, sources, articles, monthlyStats, newArticles, searchconsoleNews, searchconsoleAktienNews, searchconsoleDebug, reviewCandidates, articleContent, publishPost, aiReview, aiAssist (POST), createPost (POST)` });
     }

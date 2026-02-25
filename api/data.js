@@ -1253,6 +1253,250 @@ async function smartRanking(range = '30daysAgo', limit = 30) {
   };
 }
 
+// ─── Trend Radar: Multi-Source Trend Scanner ─────────────────────────────────
+
+// Google Trends: Daily trending searches in Germany
+async function fetchGoogleTrends() {
+  try {
+    const res = await fetch('https://trends.google.com/trending/rss?geo=DE', {
+      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; GoldeselBot/1.0)' },
+    });
+    if (!res.ok) throw new Error(`Google Trends ${res.status}`);
+    const xml = await res.text();
+    
+    // Parse RSS XML
+    const items = [];
+    const regex = /<item>[\s\S]*?<title>([^<]+)<\/title>[\s\S]*?<ht:approx_traffic>([^<]+)<\/ht:approx_traffic>[\s\S]*?(?:<ht:news_item>[\s\S]*?<ht:news_item_title>([^<]*)<\/ht:news_item_title>[\s\S]*?<ht:news_item_url>([^<]*)<\/ht:news_item_url>[\s\S]*?<\/ht:news_item>)?[\s\S]*?<\/item>/g;
+    let match;
+    while ((match = regex.exec(xml)) !== null) {
+      items.push({
+        term: match[1],
+        traffic: match[2] || '—',
+        newsTitle: match[3] || '',
+        newsUrl: match[4] || '',
+        source: 'google_trends',
+      });
+    }
+    
+    // Fallback: simpler parsing if complex regex misses
+    if (items.length === 0) {
+      const simpleRegex = /<title>([^<]+)<\/title>/g;
+      let m;
+      let skip = true; // skip first <title> (RSS channel title)
+      while ((m = simpleRegex.exec(xml)) !== null) {
+        if (skip) { skip = false; continue; }
+        items.push({ term: m[1], traffic: '—', newsTitle: '', newsUrl: '', source: 'google_trends' });
+      }
+    }
+    
+    return items.slice(0, 20);
+  } catch (err) {
+    return [{ error: err.message, source: 'google_trends' }];
+  }
+}
+
+// Reddit: Hot posts from finance subreddits
+async function fetchRedditTrends() {
+  const subreddits = ['wallstreetbets', 'stocks', 'mauerstrassenwetten', 'finanzen'];
+  const results = [];
+  
+  for (const sub of subreddits) {
+    try {
+      const res = await fetch(`https://www.reddit.com/r/${sub}/hot.json?limit=10`, {
+        headers: { 'User-Agent': 'GoldeselBot/1.0 (content research tool)' },
+      });
+      if (!res.ok) continue;
+      const data = await res.json();
+      
+      (data.data?.children || []).forEach(post => {
+        const d = post.data;
+        if (d.stickied) return; // skip pinned
+        results.push({
+          title: d.title,
+          subreddit: sub,
+          score: d.score,
+          comments: d.num_comments,
+          upvoteRatio: d.upvote_ratio,
+          url: `https://reddit.com${d.permalink}`,
+          created: new Date(d.created_utc * 1000).toISOString(),
+          source: 'reddit',
+        });
+      });
+    } catch (err) {
+      // Skip failed subreddit
+    }
+  }
+  
+  // Sort by engagement (score * upvote_ratio)
+  return results.sort((a, b) => (b.score * b.upvoteRatio) - (a.score * a.upvoteRatio)).slice(0, 20);
+}
+
+// News: Breaking finance headlines via Google News RSS
+async function fetchNewsTrends() {
+  const feeds = [
+    { url: 'https://news.google.com/rss/search?q=Aktien+OR+Börse+OR+Trading&hl=de&gl=DE&ceid=DE:de', tag: 'DE Finanzen' },
+    { url: 'https://news.google.com/rss/search?q=stock+market+OR+Wall+Street+OR+trading&hl=en&gl=US&ceid=US:en', tag: 'US Markets' },
+  ];
+  const results = [];
+  
+  for (const feed of feeds) {
+    try {
+      const res = await fetch(feed.url, {
+        headers: { 'User-Agent': 'Mozilla/5.0 (compatible; GoldeselBot/1.0)' },
+      });
+      if (!res.ok) continue;
+      const xml = await res.text();
+      
+      const regex = /<item>[\s\S]*?<title>([^<]+)<\/title>[\s\S]*?<link>([^<]*)<\/link>[\s\S]*?<pubDate>([^<]*)<\/pubDate>[\s\S]*?<source[^>]*>([^<]*)<\/source>[\s\S]*?<\/item>/g;
+      let match;
+      while ((match = regex.exec(xml)) !== null) {
+        results.push({
+          title: match[1].replace(/&amp;/g, '&').replace(/&quot;/g, '"'),
+          url: match[2],
+          pubDate: match[3],
+          newsSource: match[4],
+          tag: feed.tag,
+          source: 'news',
+        });
+      }
+    } catch (err) {
+      // Skip failed feed
+    }
+  }
+  
+  return results.slice(0, 20);
+}
+
+// YouTube: Trending finance videos in Germany
+async function fetchYouTubeTrends() {
+  // Uses YouTube RSS feeds for finance channels (no API key needed)
+  const feeds = [
+    'https://www.youtube.com/feeds/videos.xml?channel_id=UCWiY6fYNkBiw3hbSEb5MFjA', // Finanzfluss
+    'https://www.youtube.com/feeds/videos.xml?channel_id=UC084x0epw9GitCkHIzMx7Dg', // Aktien mit Kopf
+  ];
+  const results = [];
+  
+  for (const feedUrl of feeds) {
+    try {
+      const res = await fetch(feedUrl, {
+        headers: { 'User-Agent': 'Mozilla/5.0 (compatible; GoldeselBot/1.0)' },
+      });
+      if (!res.ok) continue;
+      const xml = await res.text();
+      
+      const regex = /<entry>[\s\S]*?<title>([^<]+)<\/title>[\s\S]*?<link rel="alternate" href="([^"]+)"[\s\S]*?<published>([^<]+)<\/published>[\s\S]*?<media:statistics views="(\d+)"[\s\S]*?<\/entry>/g;
+      let match;
+      while ((match = regex.exec(xml)) !== null) {
+        results.push({
+          title: match[1],
+          url: match[2],
+          published: match[3],
+          views: parseInt(match[4]) || 0,
+          source: 'youtube',
+        });
+      }
+    } catch (err) {
+      // Skip
+    }
+  }
+  
+  return results.sort((a, b) => b.views - a.views).slice(0, 10);
+}
+
+// Main: Aggregate all sources + AI analysis
+async function trendRadar(analyze = false) {
+  const [googleTrends, reddit, news, youtube] = await Promise.all([
+    fetchGoogleTrends(),
+    fetchRedditTrends(),
+    fetchNewsTrends(),
+    fetchYouTubeTrends(),
+  ]);
+  
+  const raw = { googleTrends, reddit, news, youtube };
+  
+  if (!analyze) {
+    return { raw, analysis: null };
+  }
+  
+  // AI Analysis: Let Claude evaluate and prioritize
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) return { raw, analysis: null, error: 'ANTHROPIC_API_KEY not set' };
+  
+  const prompt = `Du bist der Trend-Analyst für goldesel.de, ein deutsches Premium-Finanz- und Trading-Portal für aktive Trader und Aktien-Interessierte.
+
+Analysiere diese aktuellen Trend-Daten und identifiziere die TOP 10 besten Content-Chancen für goldesel.de.
+
+=== GOOGLE TRENDS DEUTSCHLAND ===
+${googleTrends.filter(t => !t.error).map(t => `• "${t.term}" (Traffic: ${t.traffic}) ${t.newsTitle ? '→ ' + t.newsTitle : ''}`).join('\n')}
+
+=== REDDIT HOT POSTS (Finanz-Subreddits) ===
+${reddit.filter(t => !t.error).map(t => `• [r/${t.subreddit}] "${t.title}" (Score: ${t.score}, Comments: ${t.comments})`).join('\n')}
+
+=== BREAKING NEWS ===
+${news.filter(t => !t.error).map(t => `• [${t.tag}] "${t.title}" (${t.newsSource})`).join('\n')}
+
+=== YOUTUBE TRENDS ===
+${youtube.filter(t => !t.error).map(t => `• "${t.title}" (${t.views.toLocaleString()} Views)`).join('\n')}
+
+Für jede Content-Chance, erstelle ein JSON-Array mit genau diesen Feldern:
+[
+  {
+    "rank": 1,
+    "topic": "Thema auf Deutsch",
+    "headline": "Vorgeschlagene Headline für goldesel.de (max 70 Zeichen)",
+    "angle": "Kurze Beschreibung des Artikel-Angles (1 Satz)",
+    "viralScore": 85,
+    "urgency": "high|medium|low",
+    "sources": ["google_trends", "reddit"],
+    "reasoning": "Warum ist das relevant für Goldesel-Leser? (1-2 Sätze)",
+    "articleType": "news|analyse|ratgeber|topstory",
+    "estimatedSearchVolume": "hoch|mittel|niedrig"
+  }
+]
+
+Regeln:
+- Fokus auf Finanz-, Trading-, Aktien-, Wirtschaftsthemen
+- Ignoriere nicht-finanzrelevante Trends (Sport, Entertainment, Politik ohne Marktbezug)
+- viralScore 0-100 basierend auf: Multi-Source-Präsenz, Aktualität, Goldesel-Relevanz, Suchpotenzial
+- urgency "high" = heute publishen, "medium" = diese Woche, "low" = kann warten
+- Wenn ein Thema in mehreren Quellen auftaucht → höherer Score
+- Antworte NUR mit dem JSON-Array, kein anderer Text`;
+
+  try {
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 4096,
+        messages: [{ role: 'user', content: prompt }],
+      }),
+    });
+    
+    if (!res.ok) {
+      const errText = await res.text();
+      throw new Error(`Claude API ${res.status}: ${errText.substring(0, 200)}`);
+    }
+    
+    const json = await res.json();
+    const text = json.content?.map(b => b.text).join('\n') || '';
+    const cleaned = text.replace(/```json|```/g, '').trim();
+    
+    try {
+      const analysis = JSON.parse(cleaned);
+      return { raw, analysis };
+    } catch (e) {
+      return { raw, analysis: null, parseError: cleaned.substring(0, 300) };
+    }
+  } catch (err) {
+    return { raw, analysis: null, error: err.message };
+  }
+}
+
 // ─── AI Assist (generic prompt → Claude) ─────────────────────────────────────
 async function aiAssist(prompt, mode) {
   const apiKey = process.env.ANTHROPIC_API_KEY;
@@ -1443,6 +1687,7 @@ module.exports = async function handler(req, res) {
       case 'publishPost':        data = await publishPost(req.query.postId);   break;
       case 'aiReview':           data = await aiReview(req.query.postId);      break;
       case 'smartRanking':       data = await smartRanking(req.query.range || '30daysAgo', parseInt(req.query.limit) || 30); break;
+      case 'trendRadar':         data = await trendRadar(req.query.analyze === 'true'); break;
       case 'aiAssist':           data = await aiAssist(body.prompt, body.mode); break;
       case 'createPost':         data = await createWPPost(body.title, body.content, body.status || 'draft', {
         categories: body.categories,

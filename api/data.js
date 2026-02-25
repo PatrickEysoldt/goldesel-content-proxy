@@ -213,9 +213,6 @@ async function articles() {
   return posts.map(p => ({ id: p.id, title: p.title.rendered, url: p.link, date: p.date, slug: p.slug }));
 }
 
-// Daily pageviews for last 30 days (for dashboard chart)
-async function dailyPageviews() {
-
 // Content category analysis for strategy page
 async function contentAnalysis() {
   // Fetch articles by WP category with GA4 performance

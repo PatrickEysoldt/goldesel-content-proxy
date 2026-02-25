@@ -1135,6 +1135,124 @@ async function searchConsoleDebug() {
   };
 }
 
+// ─── Smart Ranking Engine ────────────────────────────────────────────────────
+// Composite "Discover Score" from GA4 metrics: pageviews, engagement, duration,
+// new-user ratio, bounce rate. Architecture allows future custom events
+// (scroll depth, shares, CTR) to be plugged in.
+async function smartRanking(range = '30daysAgo', limit = 30) {
+  const client = getGA4Client();
+  const [response] = await client.runReport({
+    property: propertyId,
+    dateRanges: [{ startDate: range, endDate: 'today' }],
+    dimensions: [{ name: 'pagePath' }, { name: 'pageTitle' }],
+    metrics: [
+      { name: 'screenPageViews' },
+      { name: 'sessions' },
+      { name: 'newUsers' },
+      { name: 'totalUsers' },
+      { name: 'engagementRate' },
+      { name: 'averageSessionDuration' },
+      { name: 'bounceRate' },
+    ],
+    dimensionFilter: {
+      filter: {
+        fieldName: 'pagePath',
+        stringFilter: { matchType: 'CONTAINS', value: '/news/' },
+      },
+    },
+    orderBys: [{ metric: { metricName: 'screenPageViews' }, desc: true }],
+    limit: 200,
+  });
+
+  const articles = (response.rows || []).map(row => {
+    const path = row.dimensionValues[0].value;
+    const title = row.dimensionValues[1].value;
+    const m = row.metricValues;
+    return {
+      path,
+      title: title.replace(/ [-–|].*$/, '').trim(),
+      pageviews: parseInt(m[0].value) || 0,
+      sessions: parseInt(m[1].value) || 0,
+      newUsers: parseInt(m[2].value) || 0,
+      totalUsers: parseInt(m[3].value) || 0,
+      engagementRate: parseFloat(m[4].value) || 0,
+      avgDuration: parseFloat(m[5].value) || 0,
+      bounceRate: parseFloat(m[6].value) || 0,
+    };
+  }).filter(a => a.sessions >= 3); // Minimum threshold to avoid noise
+
+  if (!articles.length) return { articles: [], weights: {}, thresholds: {} };
+
+  // Compute normalization thresholds (percentile-based)
+  const vals = (key) => articles.map(a => a[key]).sort((a, b) => a - b);
+  const p95 = (arr) => arr[Math.floor(arr.length * 0.95)] || arr[arr.length - 1];
+  const p5 = (arr) => arr[Math.floor(arr.length * 0.05)] || arr[0];
+
+  const thresholds = {
+    pageviews: { min: p5(vals('pageviews')), max: p95(vals('pageviews')) },
+    engagementRate: { min: p5(vals('engagementRate')), max: p95(vals('engagementRate')) },
+    avgDuration: { min: p5(vals('avgDuration')), max: p95(vals('avgDuration')) },
+    bounceRate: { min: p5(vals('bounceRate')), max: p95(vals('bounceRate')) },
+  };
+
+  // Normalize 0-100 with clamping
+  const norm = (val, min, max) => {
+    if (max === min) return 50;
+    return Math.max(0, Math.min(100, ((val - min) / (max - min)) * 100));
+  };
+
+  // Weights — designed to be extended with custom events later
+  // Future: scrollDepth (15%), shares (10%), ctr (10%) → reduce pageviews/engagement accordingly
+  const weights = {
+    pageviews: 0.30,       // Reichweite
+    engagementRate: 0.25,  // Qualität
+    avgDuration: 0.20,     // Tiefe
+    newUserRatio: 0.15,    // Entdeckbarkeit
+    bounceInverse: 0.10,   // Relevanz
+    // Future slots:
+    // scrollDepth: 0.00,
+    // shares: 0.00,
+    // ctr: 0.00,
+  };
+
+  // Calculate Discover Score for each article
+  articles.forEach(a => {
+    const newUserRatio = a.totalUsers > 0 ? (a.newUsers / a.totalUsers) : 0;
+    
+    const components = {
+      pageviews: norm(a.pageviews, thresholds.pageviews.min, thresholds.pageviews.max),
+      engagementRate: norm(a.engagementRate, thresholds.engagementRate.min, thresholds.engagementRate.max),
+      avgDuration: norm(a.avgDuration, thresholds.avgDuration.min, thresholds.avgDuration.max),
+      newUserRatio: norm(newUserRatio, 0, 1) ,
+      bounceInverse: norm(1 - a.bounceRate, 1 - thresholds.bounceRate.max, 1 - thresholds.bounceRate.min),
+    };
+
+    a.scoreComponents = components;
+    a.discoverScore = Math.round(
+      components.pageviews * weights.pageviews +
+      components.engagementRate * weights.engagementRate +
+      components.avgDuration * weights.avgDuration +
+      components.newUserRatio * weights.newUserRatio +
+      components.bounceInverse * weights.bounceInverse
+    );
+    a.newUserRatio = Math.round(newUserRatio * 100);
+  });
+
+  // Sort by discover score
+  articles.sort((a, b) => b.discoverScore - a.discoverScore);
+
+  return {
+    articles: articles.slice(0, limit),
+    weights,
+    thresholds,
+    meta: {
+      totalAnalyzed: articles.length,
+      avgScore: Math.round(articles.reduce((s, a) => s + a.discoverScore, 0) / articles.length),
+      range,
+    },
+  };
+}
+
 // ─── AI Assist (generic prompt → Claude) ─────────────────────────────────────
 async function aiAssist(prompt, mode) {
   const apiKey = process.env.ANTHROPIC_API_KEY;
@@ -1324,6 +1442,7 @@ module.exports = async function handler(req, res) {
       case 'articleContent':     data = await articleContent(req.query.postId); break;
       case 'publishPost':        data = await publishPost(req.query.postId);   break;
       case 'aiReview':           data = await aiReview(req.query.postId);      break;
+      case 'smartRanking':       data = await smartRanking(req.query.range || '30daysAgo', parseInt(req.query.limit) || 30); break;
       case 'aiAssist':           data = await aiAssist(body.prompt, body.mode); break;
       case 'createPost':         data = await createWPPost(body.title, body.content, body.status || 'draft', {
         categories: body.categories,

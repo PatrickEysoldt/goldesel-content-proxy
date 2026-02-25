@@ -400,41 +400,57 @@ async function contentAttribution() {
   const articles = (response.rows || []).map(row => {
     const path = row.dimensionValues[0].value;
     const slug = path.split('/').filter(Boolean).pop() || path;
+    const bounceRaw = parseFloat(row.metricValues[4].value || 0);
+    const engRaw = parseFloat(row.metricValues[5].value || 0);
+    // GA4 returns these as percentages (0-100) already
+    const bounceRate = bounceRaw > 1 ? bounceRaw : bounceRaw * 100;
+    const engagementRate = engRaw > 1 ? engRaw : engRaw * 100;
     return {
       path,
       slug,
       title: decodeURIComponent(slug).replace(/-/g, ' '),
-      newUsers: parseInt(row.metricValues[0].value),
-      sessions: parseInt(row.metricValues[1].value),
-      pageviews: parseInt(row.metricValues[2].value),
-      avgSessionDuration: parseFloat(row.metricValues[3].value).toFixed(0),
-      bounceRate: (parseFloat(row.metricValues[4].value) * 100).toFixed(1),
-      engagementRate: (parseFloat(row.metricValues[5].value) * 100).toFixed(1),
+      newUsers: parseInt(row.metricValues[0].value) || 0,
+      sessions: parseInt(row.metricValues[1].value) || 0,
+      pageviews: parseInt(row.metricValues[2].value) || 0,
+      avgSessionDuration: parseFloat(row.metricValues[3].value || 0).toFixed(0),
+      bounceRate: bounceRate.toFixed(1),
+      engagementRate: engagementRate.toFixed(1),
     };
   });
 
-  // 2. Get titles from WP for top articles
+  // 2. Enrich with WP titles + CTA detection (in batches of 10 slugs)
   try {
-    const slugs = articles.slice(0, 30).map(a => a.slug);
-    const wpArticles = await wpFetch(`posts?per_page=30&status=publish&slug=${slugs.join(',')}&_fields=slug,title,content`);
+    const slugsToFetch = articles.slice(0, 30).map(a => a.slug).filter(Boolean);
     const titleMap = {};
     const ctaMap = {};
-    wpArticles.forEach(p => {
-      titleMap[p.slug] = p.title.rendered;
-      // CTA detection: check if article content contains common CTA patterns
-      const content = (p.content?.rendered || '').toLowerCase();
-      ctaMap[p.slug] = {
-        hasCTA: content.includes('premium') || content.includes('jetzt testen') || content.includes('kostenlos') || content.includes('registrier') || content.includes('anmeld') || content.includes('goldesel.de/premium') || content.includes('cta') || content.includes('signup'),
-        hasProductMention: content.includes('goldesel') && (content.includes('tool') || content.includes('plattform') || content.includes('analyse') || content.includes('signal') || content.includes('watchlist')),
-        hasInternalLinks: (content.match(/href="https?:\/\/(goldesel\.de|goldeselblog\.de)[^"]*"/gi) || []).length,
-      };
-    });
+    
+    // WP REST API: fetch in batches of 10 using slug parameter
+    for (let i = 0; i < slugsToFetch.length; i += 10) {
+      const batch = slugsToFetch.slice(i, i + 10);
+      const slugParam = batch.map(s => encodeURIComponent(s)).join(',');
+      try {
+        const wpArticles = await wpFetch(`posts?per_page=10&status=publish&slug=${slugParam}&_fields=slug,title,content`);
+        (wpArticles || []).forEach(p => {
+          titleMap[p.slug] = p.title?.rendered || p.slug;
+          const content = (p.content?.rendered || '').toLowerCase();
+          ctaMap[p.slug] = {
+            hasCTA: content.includes('premium') || content.includes('jetzt testen') || content.includes('kostenlos') || content.includes('registrier') || content.includes('anmeld') || content.includes('goldesel.de/premium') || content.includes('cta') || content.includes('signup'),
+            hasProductMention: content.includes('goldesel') && (content.includes('tool') || content.includes('plattform') || content.includes('analyse') || content.includes('signal') || content.includes('watchlist')),
+            hasInternalLinks: (content.match(/href="https?:\/\/(goldesel\.de|goldeselblog\.de)[^"]*"/gi) || []).length,
+          };
+        });
+      } catch (batchErr) {
+        console.error('WP batch error:', batchErr.message);
+      }
+    }
+    
     articles.forEach(a => {
       if (titleMap[a.slug]) a.title = titleMap[a.slug];
       if (ctaMap[a.slug]) a.cta = ctaMap[a.slug];
     });
   } catch (err) {
-    // WP enrichment failed, continue with GA4 data only
+    console.error('WP enrichment failed:', err.message);
+    // Continue with GA4 data only — titles will be slug-based
   }
 
   // 3. Summary stats

@@ -67,6 +67,89 @@ async function wpFetch(path) {
   return res.json();
 }
 
+// ─── Yoast Focus Keyword Helper ──────────────────────────────────────────────
+// WP REST API doesn't expose Yoast meta by default. We try multiple strategies:
+// 1. meta._yoast_wpseo_focuskw (if site has REST meta registration)
+// 2. Direct DB query via custom WP REST endpoint (if available)  
+// 3. Parse from yoast_head raw HTML string
+// 4. Return empty string
+
+function extractYoastFromMeta(post) {
+  const meta = post.meta || {};
+  const yoast = post.yoast_head_json || {};
+  
+  // Strategy 1: Direct meta field (requires WP snippet or Yoast Premium)
+  const focusKw = meta._yoast_wpseo_focuskw || meta['yoast_wpseo_focuskw'] || '';
+  if (focusKw) return { focusKeyword: focusKw, source: 'meta' };
+  
+  // Strategy 2: Parse from yoast_head raw HTML string
+  // Yoast injects a hidden meta or JSON-LD; the focuskw isn't in yoast_head,
+  // but we can check for some indicators
+  const yoastHead = post.yoast_head || '';
+  
+  // Strategy 3: Check yoast_head_json (title, og_description exist here)
+  return {
+    focusKeyword: '',
+    seoTitle: yoast.title || meta._yoast_wpseo_title || '',
+    seoDescription: yoast.og_description || yoast.description || meta._yoast_wpseo_metadesc || '',
+    source: 'none'
+  };
+}
+
+// Batch fetch focus keywords via WP postmeta table (custom endpoint)
+// This requires the WP snippet below to be installed on goldesel.de:
+/*
+  === WP CODE SNIPPET (Add to functions.php or Code Snippets Plugin) ===
+  
+  // Expose Yoast Focus Keyword in REST API
+  add_action('rest_api_init', function() {
+    register_rest_field('post', 'yoast_focuskw', array(
+      'get_callback' => function($post) {
+        return get_post_meta($post['id'], '_yoast_wpseo_focuskw', true) ?: '';
+      },
+      'schema' => array('type' => 'string', 'description' => 'Yoast Focus Keyword'),
+    ));
+  });
+  
+  === END SNIPPET ===
+*/
+async function fetchYoastFocusKeywords(postIds) {
+  if (!postIds.length) return {};
+  const base = process.env.WP_URL;
+  const user = process.env.WP_USER;
+  const pass = process.env.WP_APP_PASS;
+  const auth = Buffer.from(`${user}:${pass}`).toString('base64');
+  
+  // Try fetching with the custom yoast_focuskw field (requires snippet above)
+  const results = {};
+  
+  try {
+    // Fetch posts with include filter — checks if yoast_focuskw field is available
+    const ids = postIds.slice(0, 30).join(',');
+    const res = await fetch(
+      `${base}/wp-json/wp/v2/posts?include=${ids}&_fields=id,yoast_focuskw,meta&per_page=30`,
+      { headers: { Authorization: `Basic ${auth}` } }
+    );
+    if (res.ok) {
+      const posts = await res.json();
+      for (const p of posts) {
+        // Custom field from snippet
+        if (p.yoast_focuskw) {
+          results[p.id] = p.yoast_focuskw;
+        }
+        // Fallback: check meta
+        else if (p.meta?._yoast_wpseo_focuskw) {
+          results[p.id] = p.meta._yoast_wpseo_focuskw;
+        }
+      }
+    }
+  } catch (err) {
+    // Snippet not installed — that's fine, we return empty
+  }
+  
+  return results;
+}
+
 // ─── Datum-Helper ─────────────────────────────────────────────────────────────
 function resolveDate(d) {
   if (d === 'today') return new Date();
@@ -335,15 +418,30 @@ async function reviewCandidates() {
   // Letzte 15 veröffentlichte + alle drafts/pending
   // Include yoast_head_json for SEO meta (Yoast REST API extension)
   const [published, drafts, pending] = await Promise.all([
-    wpFetch('posts?per_page=15&status=publish&orderby=date&order=desc&_fields=id,title,link,date,slug,categories,author,excerpt,yoast_head_json,meta'),
-    wpFetch('posts?per_page=10&status=draft&orderby=date&order=desc&_fields=id,title,link,date,slug,categories,author,excerpt,yoast_head_json,meta').catch(() => []),
-    wpFetch('posts?per_page=10&status=pending&orderby=date&order=desc&_fields=id,title,link,date,slug,categories,author,excerpt,yoast_head_json,meta').catch(() => []),
+    wpFetch('posts?per_page=15&status=publish&orderby=date&order=desc&_fields=id,title,link,date,slug,categories,author,excerpt,yoast_head_json,meta,yoast_focuskw'),
+    wpFetch('posts?per_page=10&status=draft&orderby=date&order=desc&_fields=id,title,link,date,slug,categories,author,excerpt,yoast_head_json,meta,yoast_focuskw').catch(() => []),
+    wpFetch('posts?per_page=10&status=pending&orderby=date&order=desc&_fields=id,title,link,date,slug,categories,author,excerpt,yoast_head_json,meta,yoast_focuskw').catch(() => []),
   ]);
+
+  const allPosts = [...pending, ...drafts, ...published];
+  
+  // Batch-fetch focus keywords (separate call in case custom field is available)
+  const postIds = allPosts.map(p => p.id);
+  const focusKeywords = await fetchYoastFocusKeywords(postIds).catch(() => ({}));
 
   const mapPost = (p, status) => {
     // Yoast exposes data via yoast_head_json (REST API v2) or meta fields
     const yoast = p.yoast_head_json || {};
     const meta = p.meta || {};
+    
+    // Focus keyword: try all sources
+    const focusKeyword = 
+      p.yoast_focuskw ||                          // Custom REST field (from WP snippet)
+      focusKeywords[p.id] ||                       // Batch-fetched
+      meta._yoast_wpseo_focuskw ||                 // Direct meta (if exposed)
+      meta['yoast_wpseo_focuskw'] ||               // Alternative key
+      '';
+
     return {
       id: p.id,
       title: p.title.rendered,
@@ -354,7 +452,7 @@ async function reviewCandidates() {
       wpStatus: status,
       categories: p.categories || [],
       // Yoast SEO fields
-      focusKeyword: meta._yoast_wpseo_focuskw || meta.yoast_wpseo_focuskw || yoast.focuskw || '',
+      focusKeyword,
       seoTitle: yoast.title || meta._yoast_wpseo_title || '',
       seoDescription: yoast.og_description || yoast.description || meta._yoast_wpseo_metadesc || '',
       seoScore: yoast.schema?.mainEntityOfPage?.['@type'] || '',
@@ -371,7 +469,10 @@ async function reviewCandidates() {
 // Volltext eines einzelnen Artikels für KI-Review (inkl. Yoast SEO Meta)
 async function articleContent(postId) {
   if (!postId) throw new Error('postId parameter required');
-  const post = await wpFetch(`posts/${postId}?_fields=id,title,content,excerpt,slug,link,date,categories,author,yoast_head_json,meta`);
+  const post = await wpFetch(`posts/${postId}?_fields=id,title,content,excerpt,slug,link,date,categories,author,yoast_head_json,meta,yoast_focuskw`);
+
+  // Also try batch keyword fetch for this single post
+  const focusKeywords = await fetchYoastFocusKeywords([postId]).catch(() => ({}));
   // HTML-Tags entfernen für sauberen Text
   const rawHtml = post.content?.rendered || '';
   const plainText = rawHtml
@@ -405,10 +506,15 @@ async function articleContent(postId) {
   const internalLinks = (rawHtml.match(/href="https?:\/\/(goldesel\.de|goldeselblog\.de)[^"]*"/gi) || []).length;
   const externalLinks = (rawHtml.match(/href="https?:\/\/(?!goldesel\.de|goldeselblog\.de)[^"]*"/gi) || []).length;
 
-  // Yoast SEO data
+  // Yoast SEO data - try all sources
   const yoast = post.yoast_head_json || {};
   const meta = post.meta || {};
-  const focusKeyword = meta._yoast_wpseo_focuskw || meta.yoast_wpseo_focuskw || yoast.focuskw || '';
+  const focusKeyword = 
+    post.yoast_focuskw ||                          // Custom REST field
+    focusKeywords[postId] ||                        // Batch-fetched
+    meta._yoast_wpseo_focuskw ||                   // Direct meta
+    meta['yoast_wpseo_focuskw'] ||                 // Alternative key
+    '';
   const seoTitle = yoast.title || meta._yoast_wpseo_title || '';
   const seoDescription = yoast.og_description || yoast.description || meta._yoast_wpseo_metadesc || '';
 
@@ -865,11 +971,23 @@ async function aiAssist(prompt, mode) {
 }
 
 // ─── Create WP Post ──────────────────────────────────────────────────────────
-async function createWPPost(title, content, status = 'draft') {
+async function createWPPost(title, content, status = 'draft', options = {}) {
   const base = process.env.WP_URL;
   const user = process.env.WP_USER;
   const pass = process.env.WP_APP_PASS;
   const auth = Buffer.from(`${user}:${pass}`).toString('base64');
+
+  const postData = {
+    title,
+    content,
+    status,
+  };
+
+  // Optional fields
+  if (options.categories && options.categories.length) postData.categories = options.categories;
+  if (options.tags && options.tags.length) postData.tags = options.tags;
+  if (options.excerpt) postData.excerpt = options.excerpt;
+  if (options.slug) postData.slug = options.slug;
 
   const res = await fetch(`${base}/wp-json/wp/v2/posts`, {
     method: 'POST',
@@ -877,11 +995,7 @@ async function createWPPost(title, content, status = 'draft') {
       Authorization: `Basic ${auth}`,
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({
-      title,
-      content,
-      status,
-    }),
+    body: JSON.stringify(postData),
   });
 
   if (!res.ok) {
@@ -890,7 +1004,7 @@ async function createWPPost(title, content, status = 'draft') {
   }
 
   const post = await res.json();
-  return { id: post.id, link: post.link, status: post.status };
+  return { id: post.id, link: post.link, status: post.status, editLink: `${base}/wp-admin/post.php?post=${post.id}&action=edit` };
 }
 
 // ─── Handler ──────────────────────────────────────────────────────────────────
@@ -932,7 +1046,12 @@ module.exports = async function handler(req, res) {
       case 'publishPost':        data = await publishPost(req.query.postId);   break;
       case 'aiReview':           data = await aiReview(req.query.postId);      break;
       case 'aiAssist':           data = await aiAssist(body.prompt, body.mode); break;
-      case 'createPost':         data = await createWPPost(body.title, body.content, body.status || 'draft'); break;
+      case 'createPost':         data = await createWPPost(body.title, body.content, body.status || 'draft', {
+        categories: body.categories,
+        tags: body.tags,
+        excerpt: body.excerpt,
+        slug: body.slug,
+      }); break;
       case 'searchconsole':          data = await searchConsoleNews();        break;
       case 'searchconsoleNews':       data = await searchConsoleNews();        break;
       case 'searchconsoleAktienNews': data = await searchConsoleAktienNews();  break;

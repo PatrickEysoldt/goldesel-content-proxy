@@ -1,6 +1,10 @@
 const { BetaAnalyticsDataClient } = require('@google-analytics/data');
 const { google } = require('googleapis');
 
+// ─── Vercel Function Config ─────────────────────────────────────────────────
+// Increase timeout for AI API calls (Claude, DALL-E) which can take 15-30s
+module.exports.config = { maxDuration: 60 };
+
 // ─── GA4 Client (cached per cold start) ──────────────────────────────────────
 let _ga4Client = null;
 function getGA4Client() {
@@ -846,7 +850,7 @@ Kontext: Goldesel ist eine Trading-Plattform mit Free- und Premium-Modell. Conte
     },
     body: JSON.stringify({
       model: 'claude-sonnet-4-20250514',
-      max_tokens: 2000,
+      max_tokens: 4096,
       system: systemPrompt,
       messages: [{ role: 'user', content: userMsg }],
     }),

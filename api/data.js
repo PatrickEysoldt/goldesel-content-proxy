@@ -502,18 +502,15 @@ async function contentAttribution() {
 async function dailyPageviews(range = '30daysAgo') {
   const client = getGA4Client();
   
-  // Calculate previous period for comparison
   const daysMap = { '1daysAgo': 1, '7daysAgo': 7, '30daysAgo': 30, '90daysAgo': 90 };
   const days = daysMap[range] || 30;
   const prevStart = `${days * 2}daysAgo`;
   const prevEnd = `${days + 1}daysAgo`;
   
+  // Current period only
   const [response] = await client.runReport({
     property: propertyId,
-    dateRanges: [
-      { startDate: range, endDate: 'today' },
-      { startDate: prevStart, endDate: prevEnd },
-    ],
+    dateRanges: [{ startDate: range, endDate: 'today' }],
     dimensions: [{ name: 'date' }],
     metrics: [
       { name: 'screenPageViews' },
@@ -523,21 +520,14 @@ async function dailyPageviews(range = '30daysAgo') {
     orderBys: [{ dimension: { dimensionName: 'date' }, desc: false }],
   });
   
-  const current = [];
-  const previous = [];
-  (response.rows || []).forEach(row => {
-    const dateRangeIdx = row.dimensionValues.length > 1 ? 0 : 0; // GA4 returns separate rows per date range
-    const entry = {
-      date: row.dimensionValues[0].value,
-      pageviews: parseInt(row.metricValues[0].value),
-      sessions: parseInt(row.metricValues[1].value),
-      newUsers: parseInt(row.metricValues[2].value),
-    };
-    current.push(entry);
-  });
+  const current = (response.rows || []).map(row => ({
+    date: row.dimensionValues[0].value,
+    pageviews: parseInt(row.metricValues[0].value),
+    sessions: parseInt(row.metricValues[1].value),
+    newUsers: parseInt(row.metricValues[2].value),
+  }));
   
-  // GA4 with two date ranges: rows for 2nd range have metricValues at indices 3,4,5
-  // Actually GA4 returns dateRangeValues — let's use a separate call for previous
+  // Previous period (separate call, non-blocking)
   let prevData = [];
   try {
     const [prevResp] = await client.runReport({

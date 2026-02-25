@@ -662,13 +662,81 @@ async function searchConsoleDebug() {
   };
 }
 
+// ─── AI Assist (generic prompt → Claude) ─────────────────────────────────────
+async function aiAssist(prompt, mode) {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) throw new Error('ANTHROPIC_API_KEY not set on server');
+
+  const res = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': apiKey,
+      'anthropic-version': '2023-06-01',
+    },
+    body: JSON.stringify({
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 4000,
+      messages: [{ role: 'user', content: prompt }],
+      system: 'Du bist ein erfahrener Finanzredakteur bei goldesel.de, einem deutschen Finanz- und Trading-Portal. Antworte auf Deutsch. Sei präzise und professionell.',
+    }),
+  });
+
+  if (!res.ok) {
+    const errText = await res.text();
+    throw new Error(`Claude API ${res.status}: ${errText.substring(0, 200)}`);
+  }
+
+  const json = await res.json();
+  const text = json.content?.map(b => b.text).join('\n') || '';
+  return { text, mode };
+}
+
+// ─── Create WP Post ──────────────────────────────────────────────────────────
+async function createWPPost(title, content, status = 'draft') {
+  const base = process.env.WP_URL;
+  const user = process.env.WP_USER;
+  const pass = process.env.WP_APP_PASS;
+  const auth = Buffer.from(`${user}:${pass}`).toString('base64');
+
+  const res = await fetch(`${base}/wp-json/wp/v2/posts`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Basic ${auth}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      title,
+      content,
+      status,
+    }),
+  });
+
+  if (!res.ok) {
+    const errText = await res.text();
+    throw new Error(`WP create error ${res.status}: ${errText.substring(0, 200)}`);
+  }
+
+  const post = await res.json();
+  return { id: post.id, link: post.link, status: post.status };
+}
+
 // ─── Handler ──────────────────────────────────────────────────────────────────
 module.exports = async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
   if (req.method === 'OPTIONS') return res.status(200).end();
 
   const { action } = req.query;
+
+  // ── POST body handling ──
+  let body = {};
+  if (req.method === 'POST') {
+    try {
+      body = typeof req.body === 'string' ? JSON.parse(req.body) : (req.body || {});
+    } catch { body = {}; }
+  }
 
   try {
     let data;
@@ -685,6 +753,8 @@ module.exports = async function handler(req, res) {
       case 'articleContent':     data = await articleContent(req.query.postId); break;
       case 'publishPost':        data = await publishPost(req.query.postId);   break;
       case 'aiReview':           data = await aiReview(req.query.postId);      break;
+      case 'aiAssist':           data = await aiAssist(body.prompt, body.mode); break;
+      case 'createPost':         data = await createWPPost(body.title, body.content, body.status || 'draft'); break;
       case 'searchconsole':          data = await searchConsoleNews();        break;
       case 'searchconsoleNews':       data = await searchConsoleNews();        break;
       case 'searchconsoleAktienNews': data = await searchConsoleAktienNews();  break;
@@ -692,7 +762,7 @@ module.exports = async function handler(req, res) {
       case 'monthlyStats': data = await monthlyStats();    break;
       case 'newArticles':  data = await newArticlesThisMonth(); break;
       default:
-        return res.status(400).json({ success: false, error: `Unbekannte action: "${action}". Verfügbar: top5, flop5, top5New, flop5New, topstories, kpis, sources, articles, monthlyStats, newArticles, searchconsoleNews, searchconsoleAktienNews, searchconsoleDebug, reviewCandidates, articleContent, publishPost` });
+        return res.status(400).json({ success: false, error: `Unbekannte action: "${action}". Verfügbar: top5, flop5, top5New, flop5New, topstories, kpis, sources, articles, monthlyStats, newArticles, searchconsoleNews, searchconsoleAktienNews, searchconsoleDebug, reviewCandidates, articleContent, publishPost, aiReview, aiAssist (POST), createPost (POST)` });
     }
     return res.status(200).json({ success: true, data });
   } catch (err) {

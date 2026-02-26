@@ -1282,6 +1282,40 @@ async function createWPPost(title, content, status = 'draft', options = {}) {
   return { id: post.id, link: post.link, status: post.status, editLink: `${base}/wp-admin/post.php?post=${post.id}&action=edit` };
 }
 
+// ─── Delete KI-News (Aktien News) ────────────────────────────────────────────
+async function deleteAktienNews(newsCode) {
+  if (!newsCode) throw new Error('newsCode (code) parameter required');
+  const apiKey = process.env.X_News_Delete_Api_Key;
+  if (!apiKey) throw new Error('X_News_Delete_Api_Key not set in environment');
+
+  const url = `https://services.goldesel.de/api/Connection/News?code=${encodeURIComponent(newsCode)}`;
+  const res = await fetch(url, {
+    method: 'DELETE',
+    headers: {
+      'X-News-Delete-Api-Key': apiKey,
+    },
+  });
+
+  if (!res.ok) {
+    const errText = await res.text();
+    throw new Error(`Delete API error (${res.status}): ${errText.substring(0, 300)}`);
+  }
+
+  // Response may be empty (204) or JSON
+  const contentType = res.headers.get('content-type') || '';
+  let responseData = null;
+  if (res.status !== 204 && contentType.includes('application/json')) {
+    responseData = await res.json();
+  }
+
+  return {
+    success: true,
+    code: newsCode,
+    status: res.status,
+    data: responseData,
+  };
+}
+
 // ─── Vercel Config ───────────────────────────────────────────────────────────
 module.exports.config = { maxDuration: 60 };
 
@@ -1343,6 +1377,7 @@ module.exports = async function handler(req, res) {
       case 'topPagesByChannel': data = await topPagesByChannel(); break;
       case 'contentAnalysis': data = await contentAnalysis(); break;
       case 'contentAttribution': data = await contentAttribution(); break;
+      case 'deleteAktienNews':   data = await deleteAktienNews(req.query.code); break;
       default:
         return res.status(400).json({ success: false, error: `Unbekannte action: "${action}". Verfügbar: top5, flop5, top5New, flop5New, topstories, kpis, sources, articles, monthlyStats, newArticles, searchconsoleNews, searchconsoleAktienNews, searchconsoleDebug, reviewCandidates, articleContent, publishPost, aiReview, aiAssist (POST), createPost (POST)` });
     }

@@ -1288,32 +1288,55 @@ async function deleteAktienNews(newsCode) {
   const apiKey = process.env.X_News_Delete_Api_Key;
   if (!apiKey) throw new Error('X_News_Delete_Api_Key not set in environment');
 
-  const url = `https://services.goldesel.de/api/Connection/News?code=${encodeURIComponent(newsCode)}`;
-  const res = await fetch(url, {
-    method: 'DELETE',
-    headers: {
-      'X-News-Delete-Api-Key': apiKey,
-    },
-  });
+  // Try path-based URL first: /api/Connection/News/{code}
+  // Fallback to query-based: /api/Connection/News?code={code}
+  const urls = [
+    `https://services.goldesel.de/api/Connection/News/${encodeURIComponent(newsCode)}`,
+    `https://services.goldesel.de/api/Connection/News?code=${encodeURIComponent(newsCode)}`,
+  ];
 
-  if (!res.ok) {
-    const errText = await res.text();
-    throw new Error(`Delete API error (${res.status}): ${errText.substring(0, 300)}`);
+  let lastErr = null;
+  for (const url of urls) {
+    try {
+      const res = await fetch(url, {
+        method: 'DELETE',
+        headers: {
+          'X-News-Delete-Api-Key': apiKey,
+        },
+      });
+
+      if (res.status === 405) {
+        // Method not allowed — try next URL pattern
+        lastErr = `405 on ${url}`;
+        continue;
+      }
+
+      if (!res.ok) {
+        const errText = await res.text();
+        throw new Error(`Delete API error (${res.status}): ${errText.substring(0, 300)}`);
+      }
+
+      // Success
+      const contentType = res.headers.get('content-type') || '';
+      let responseData = null;
+      if (res.status !== 204 && contentType.includes('application/json')) {
+        responseData = await res.json();
+      }
+
+      return {
+        success: true,
+        code: newsCode,
+        status: res.status,
+        url,
+        data: responseData,
+      };
+    } catch (err) {
+      lastErr = err.message;
+      continue;
+    }
   }
 
-  // Response may be empty (204) or JSON
-  const contentType = res.headers.get('content-type') || '';
-  let responseData = null;
-  if (res.status !== 204 && contentType.includes('application/json')) {
-    responseData = await res.json();
-  }
-
-  return {
-    success: true,
-    code: newsCode,
-    status: res.status,
-    data: responseData,
-  };
+  throw new Error(`Delete failed on all URL patterns. Last error: ${lastErr}`);
 }
 
 // ─── Vercel Config ───────────────────────────────────────────────────────────

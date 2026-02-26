@@ -1296,23 +1296,28 @@ async function deleteAktienNews(newsCode) {
     },
   });
 
-  if (!res.ok) {
-    const errText = await res.text();
-    throw new Error(`Delete API error (${res.status}): ${errText.substring(0, 300)}`);
+  // Always read the response body for debugging
+  const contentType = res.headers.get('content-type') || '';
+  let responseBody = null;
+  try {
+    const rawText = await res.text();
+    responseBody = rawText;
+    if (contentType.includes('application/json') && rawText) {
+      responseBody = JSON.parse(rawText);
+    }
+  } catch (e) {
+    // keep as text
   }
 
-  // Response may be empty (204) or JSON
-  const contentType = res.headers.get('content-type') || '';
-  let responseData = null;
-  if (res.status !== 204 && contentType.includes('application/json')) {
-    responseData = await res.json();
+  if (!res.ok) {
+    throw new Error(`Delete API error (${res.status}): ${JSON.stringify(responseBody).substring(0, 300)}`);
   }
 
   return {
     success: true,
     code: newsCode,
-    status: res.status,
-    data: responseData,
+    httpStatus: res.status,
+    response: responseBody,
   };
 }
 
